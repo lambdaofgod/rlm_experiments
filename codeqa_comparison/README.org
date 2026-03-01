@@ -1,0 +1,100 @@
+#+title: CodeQA Comparison
+
+Evaluate LLMs on the CodeQA (Code Repository Understanding) subset of LongBench-v2, using RLM (Recursive Language Models) to handle large code contexts.
+
+* Pipeline overview
+
+The pipeline has two phases:
+
+1. *Dataset preparation* -- identify source repos, split concatenated contexts into file segments, reassemble with file boundary markers.
+2. *Evaluation* -- run RLM on each question and measure accuracy.
+
+Dataset preparation is driven by =identify_files.py= (a Fire CLI with subcommands). Evaluation is =run_rlm.py=.
+
+* Scripts
+
+** =identify_files.py= -- dataset preparation CLI
+
+Entry point for all dataset preparation steps. Uses Python Fire; invoke subcommands as positional arguments.
+
+*** =identify_repos= -- find the GitHub repo for each context
+
+#+BEGIN_SRC bash
+uv run python identify_files.py identify_repos [--output repos.csv] [--max_searches 5] [--sleep 6.0]
+#+END_SRC
+
+Three-phase identification: URL extraction from context, README heading matching, GitHub code search fallback with majority voting. Writes =repos.csv= with columns =_id,repo,method=.
+
+Requires: =GITHUB_TOKEN= env var (for PyGithub) and =gh= CLI (for code search).
+
+*** =clone_repos= -- shallow-clone identified repos
+
+#+BEGIN_SRC bash
+uv run python identify_files.py clone_repos [--repos_csv repos.csv] [--dest codeqa_repos]
+#+END_SRC
+
+Shallow-clones (=--depth 1=) every unique repo from =repos.csv= into =dest/owner/name=. Skips already-cloned repos.
+
+*** =identify_files= -- match context chunks to repo files
+
+#+BEGIN_SRC bash
+uv run python identify_files.py identify_files [--repos_csv repos.csv] [--repos_dir codeqa_repos] [--output files.parquet] [--n_fragments 5] [--fragment_size 5]
+#+END_SRC
+
+Splits each context into chunks at file boundaries (language-aware heuristics for Python, C++, TypeScript), then matches chunks to actual repo files by grepping sampled fragments. Consecutive chunks matching the same file are merged into segments.
+
+Output: =files.parquet= (one row per segment) and =file_matching_metadata.csv= (per-example stats).
+
+*** =assemble_contexts= -- reassemble contexts with file headers
+
+#+BEGIN_SRC bash
+uv run python identify_files.py assemble_contexts [--segments_parquet files.parquet] [--output annotated_dataset.parquet] [--delimiter "# --- {filename} ---"] [--validate_strict]
+#+END_SRC
+
+Replaces the original concatenated context with an annotated version where each matched segment is preceded by a header line (e.g. =# --- path/to/file.py ---=). Also adds an =instruction_suffix= column explaining the delimiter convention to the LLM.
+
+Output: =annotated_dataset.parquet= with all original columns plus =context= (annotated), =instruction_suffix=, =n_segments=, =n_matched=, =repo=.
+
+** =run_rlm.py= -- RLM evaluation
+
+Run RLM on every CodeQA question and write per-question results to JSONL.
+
+#+BEGIN_SRC bash
+# With a local OpenAI-compatible server:
+OPENAI_API_KEY=foo uv run python run_rlm.py --base_url http://localhost:8080/v1/
+
+# With a hosted model:
+uv run python run_rlm.py --model openrouter/google/gemini-2.5-pro-preview
+
+# On the annotated dataset:
+uv run python run_rlm.py --dataset annotated --base_url http://localhost:8080/v1/
+
+# On a specific parquet file:
+uv run python run_rlm.py --dataset path/to/dataset.parquet --base_url http://localhost:8080/v1/
+#+END_SRC
+
+| Flag           | Default           | Description                                                    |
+|----------------+-------------------+----------------------------------------------------------------|
+| =--model=      | =openai/local=    | LiteLLM model string                                           |
+| =--base_url=   | None              | Custom OpenAI-compatible API base URL                          |
+| =--output=     | auto              | Path to output JSONL (defaults based on dataset variant)       |
+| =--dataset=    | =original=        | =original=, =annotated=, or path to a =.parquet= file         |
+| =--max_tokens= | 40960             | Max total tokens (input + output) for RLM                     |
+| =--log_dir=    | =rlm_logs=        | Directory for JSONL trajectory logs (None to disable)          |
+| =--verbose=    | False             | Enable RLM verbose console output                             |
+
+Output: JSONL with one record per question containing =id=, =question=, =gold=, =predicted=, =correct=, =raw_answer=, =model=, =timestamp=, and metadata fields.
+
+RLM is configured with compaction enabled and a custom system prompt that scales sub-LLM char limits based on context size. Examples that exceed the context window are skipped automatically.
+
+* Support modules
+
+| Module            | Purpose                                                  |
+|-------------------+----------------------------------------------------------|
+| =common.py=       | Shared types (=FileChunk=), =split_into_chunks=, =detect_language=, =load_codeqa= |
+| =repo_search.py=  | Repo identification: URL extraction, README matching, GitHub code search  |
+| =clone.py=        | Git clone helper                                         |
+| =file_match.py=   | Fragment-based file matching and segment merging          |
+| =assemble.py=     | Context reassembly with file boundary markers             |
+| =rlm_prompts.py=  | Custom RLM system prompt with dynamic char limits         |
+| =dspy_rlm.py=     | Legacy DSPy RLM wrapper (unused, kept for reference)      |

@@ -1,0 +1,20 @@
+#+title: Research Questions
+
+
+These are the research questions for experiments with RLMs on CodeQA from LongBenchV2
+
+* RQ1 How do smaller models perform compared to frontier models? 
+:PROPERTIES:
+:CREATED:  <2026-02-24 Tue> [13:46]
+:END:
+
+* RQ2 Does the context format hurt performance significantly?
+:PROPERTIES:
+:CREATED:  <2026-02-24 Tue> [13:46]
+:END:
+
+The contexts are just concatenated file contents. This is problematic because
+- it makes the context hard to navigate - there aren't even any straightforward ways to split the contexts into files (they seem to start with docstring that describes the contents, but docstrings also occur in other file parts which makes it hard to split them into files automatically)
+- the file names are not mentioned 
+
+Unfortunately I wasn't able to find how exactly these contexts were prepared so it doesn't seem like there exists a simple way to recover file names.

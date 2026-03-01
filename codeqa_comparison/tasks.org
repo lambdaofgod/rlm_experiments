@@ -1,0 +1,159 @@
+#+title: Tasks
+
+
+* Feature: setting up a cleaner dataset 
+:PROPERTIES:
+:CREATED:  <2026-02-26 Thu> [13:43]
+:END:
+
+We want to set up the CodeQA dataset in a better way - right now the dataset just uses concatenated files as context which might make the problem unnecessarily hard, because the LLMs get confused since it is not even easy to see file boundaries.
+
+** DONE Get file repositories 
+CLOSED: [2026-02-26 Thu 13:45]
+:PROPERTIES:
+:CREATED:  <2026-02-26 Thu> [13:45]
+:END:
+
+This happens in `identify_files.py::Main.identify_repos`.
+
+Three-phase repo identification for each of the 50 CodeQA contexts:
+1. URL extraction -- regex-scans context for github.com/owner/repo, picks most frequent, validates via PyGithub.
+2. README heading -- looks for =# Name= headings where name appears in import/from/pip install in the same chunk.
+3. GitHub code search fallback -- picks distinctive code lines from sampled chunks, runs =gh api search/code=, majority-votes across results. Also tries co-occurring definition names (class/function >= 8 chars). Has rate-limit retry (5 tries, exponential backoff).
+
+Before searching, contexts are split into chunks at likely file boundaries (blank line + preamble heuristics: shebangs, docstrings, cmake, markdown headers). Each chunk extracts definition names.
+
+Output: =repos.csv= with columns =_id,repo,method=.
+
+** DONE clone repos 
+CLOSED: [2026-02-26 Thu 13:45]
+:PROPERTIES:
+:CREATED:  <2026-02-26 Thu> [13:45]
+:END:
+
+** DONE split contexts into file segments
+CLOSED: [2026-02-27 Thu]
+
+The actual repo files may differ significantly from what's in the context, so we can't use them directly. Instead, we want to split each context into segments that come from the same file.
+
+Implementation (=file_match.py= + =identify_files.py::Main.identify_files=):
+- [X] Split context into chunks (=split_into_chunks=).
+- [X] Match each chunk to a filename by sampling N contiguous 5-line fragments and grepping them against the cloned repo. The file with the most fragment hits wins.
+- [X] Walk chunks in order -- consecutive chunks that matched the same file get merged into a single segment. Unmatched chunks also become segments (with =filename=None=).
+- [X] Returns a DataFrame with one row per segment: =_id=, =repo=, =segment= (index), =filename= (None if unmatched), =start_line=, =end_line=, =text=. Saved as parquet.
+- [X] Output metadata CSV (=file_matching_metadata.csv=) with per-example stats.
+
+Input: LongBench-v2 dataset + =repos.csv= + cloned repos in =codeqa_repos/=.
+
+** DONE improve chunk splitting with language-aware heuristics
+CLOSED: [2026-02-27 Thu]
+
+The current =split_into_chunks= uses generic heuristics (blank line + preamble patterns). We can do better with language-specific file boundary detection.
+
+*** 1. DONE Language detection:
+- [X] Detect the primary language of a context using class/struct/interface definition syntax and import patterns (=#include=, =import=/=from=, TS =import ... from=). Implemented as =detect_language()= in =common.py=. Returns "py", "cpp", "ts", or "unknown". Tested: 42 py, 6 cpp, 1 ts, 1 unknown across 50 examples.
+
+*** 2. C++:
+- [X] Detect file boundaries: a comment block followed by an =#include= section together indicate a file start. Implemented as =_find_cpp_boundaries()= and =_is_cpp_comment_line()= in =common.py=, integrated into =split_into_chunks= when =detect_language= returns "cpp".
+- [X] Extract filename hint from first =#include "FILENAME.h"= or =#include <FILENAME.h>= in each chunk. Stored as =FileChunk.filename_hint=. Tests in =test_common.py=.
+
+*** 3. DONE Python:
+- [X] Use unindented (column 0) docstrings (="""= / ='''=) as file boundary markers -- already handled by =line.startswith('"""')= in the preamble check. Indented docstrings never trigger splits since =startswith= requires column 0. Also handles =from __future__= and shebangs.
+- [X] Tests for Python splitting heuristics (=test_common.py=: module docstrings, multiline docstrings, indented docstrings excluded, from_future, shebang).
+
+*** 4. DONE General:
+- [X] Integrated into =split_into_chunks=: calls =detect_language= and applies C++ boundaries when "cpp". Python already handled by existing preamble checks.
+- [X] Tests for overall language-aware splitting (=test_common.py=: C++ boundaries ignored for Python, cmake+C++ mixed context, language detection feeding into splitting). 23 tests total.
+
+*** 5. DONE Use filename_hint in file matching
+- [X] =match_chunk= in =file_match.py= uses =FileChunk.filename_hint= as fallback when fragment matching produces no hits. Implemented via =_match_by_hint()= which finds repo files ending with the hint basename (only when unambiguous, i.e. exactly one match).
+
+** DONE refactor: split identify_files.py into modules
+CLOSED: [2026-02-26 Thu 14:05]
+
+=identify_files.py= is too large. Split into separate modules per Main method:
+
+- =common.py= -- shared bits: =load_codeqa=, =FileChunk=, =split_into_chunks=
+- =repo_search.py= -- repo identification helpers: =repo_from_url=, =repo_from_readme=, =search_repo=, =_gh_code_search=, =identify_repo=, etc.
+- =clone.py= -- =clone_repos=
+- =file_match.py= -- file identification helpers: =_read_repo_files=, =_match_chunk=, =_pick_match_lines=
+- =identify_files.py= -- thin CLI entry point with =Main= class that imports from the above
+
+** TODO glue the context together with repo/file information
+:PROPERTIES:
+:CREATED:  <2026-03-01 Sun> [12:31]
+:END:
+
+Reassemble the CodeQA contexts with explicit file boundary markers and filenames. The original dataset concatenates files without any separators; we replace the =context= field with an annotated version where each file segment is preceded by a header line (e.g. =# --- path/to/file.py ---=). Unmatched segments get no header (or =# --- unknown ---=).
+
+Implementation (=assemble.py= + =identify_files.py::Main.assemble_contexts=):
+
+*** DONE =annotate_row=: annotate a single example
+Process one example's segments into an annotated row. Uses:
+- [X] =annotate_context(segments, delimiter)=: reconstruct context with file headers (DONE, in =assemble.py=).
+- [X] =make_instruction_suffix(delimiter)=: short string explaining the delimiter convention, appended to the LLM prompt.
+- [X] Returns a dict with =context= (annotated), =instruction_suffix=, =n_segments=, =n_matched=, =repo=, =language=.
+
+*** DONE =Main.assemble_contexts=: CLI entry point
+- [X] Add =assemble_contexts(segments_parquet, output, delimiter)= to =Main= in =identify_files.py=.
+- [X] Load original dataset via =load_codeqa()=, read =files.parquet=, group by =_id=.
+- [X] For each example: call =annotate_row= to produce the annotated fields.
+- [X] Carry over all original columns (=_id=, =question=, =answer=, =domain=, etc.) with =context= replaced and new columns added.
+- [X] Save as parquet to =output=.
+
+Input: =files.parquet= (from =identify_files=) + original LongBench-v2 dataset.
+Output: annotated dataset parquet.
+
+*** DONE Validate output
+- [X] Spot-check a few examples to verify file boundaries look correct.
+- [X] Compare context lengths before/after to ensure nothing was lost or duplicated.
+
+*** TODO Push to HuggingFace
+- [ ] Push the final dataset to HuggingFace Hub.
+
+* Feature: RLM evaluation on CodeQA
+
+Run RLM on the CodeQA subset to evaluate LLM performance on code repository understanding questions.
+
+** DONE Basic RLM evaluation script
+CLOSED: [2026-03-01 Sun]
+
+=run_rlm.py= -- CLI script (via Python Fire) that runs RLM on every CodeQA question and writes results to JSONL.
+
+- [X] =load_codeqa()=: load LongBench-v2, filter to "Code Repository Understanding" domain.
+- [X] =build_query(example)=: format question + choices A-D into a multiple-choice query string.
+- [X] =extract_choice(answer_text)=: parse the model's answer to a single letter (A/B/C/D).
+- [X] =run_single(rlm, example)=: build prompt from =PROMPT_TEMPLATE= (context + query), call =rlm.completion=, extract choice.
+- [X] =make_record(example, predicted, raw_answer, model)=: build a result dict with id, question, gold, predicted, correct, metadata, timestamp.
+- [X] =main(model, base_url, output, verbose)=: instantiate RLM with LiteLLM backend, iterate examples, write JSONL, print running accuracy.
+
+Prompt template: system instruction + =--- CONTEXT ---= block + query.
+Output: JSONL with one record per question (=results_rlm.jsonl=).
+
+** DONE Integrate processed dataset
+CLOSED: [2026-03-01 Sun]
+
+Add support for running RLM on the annotated dataset (=annotated_dataset.parquet=) alongside the original. The annotated dataset has file boundary markers in the context and an =instruction_suffix= column explaining the delimiter convention.
+
+The =instruction_suffix= must NOT go inside the context (RLM decomposes the context recursively). Instead it is appended to the question via a =prompt= column, which ends up in the ={query}= part of the template, outside the =--- CONTEXT ---= block.
+
+- [X] =load_annotated_codeqa(path)=: load =annotated_dataset.parquet= via pandas, build =prompt= column (=question + "\n\n" + instruction_suffix=), return the DataFrame. Main loop iterates via =iterrows()=.
+- [X] =build_query(example)=: use =example.get("prompt", example["question"])= so it picks up the suffix when present, falls back to plain question for the original dataset.
+- [X] Add =dataset= flag to =main()=: ="original"= (default) or ="annotated"=. Controls which load function is called. Default output filename reflects the variant (=results_rlm.jsonl= vs =results_rlm_annotated.jsonl=).
+
+** DONE Context size, compaction, and logging
+CLOSED: [2026-03-01 Sun]
+
+*** Problem
+RLM's built-in prompts tell the sub-LLM that it can handle ~500K chars per =llm_query= call (hardcoded in =RLM_SYSTEM_PROMPT=, lines 12 and 40). This causes the model to generate huge string variables and verbose =print()= output, all of which accumulates in =message_history=. Each iteration can add 2-7K tokens (response + code output truncated at 20K chars). With a 32K context window, just 2-3 iterations blow past the limit before compaction kicks in.
+
+*** Why 64K works
+Compaction triggers at 85% of the context limit (~54K tokens for 64K). With 64K, the workload that hit 35K at iteration 2 is still well within limits, and when compaction does trigger the summarization call actually fits in the window. With 32K, the compaction call itself couldn't fit the full history. The 500K prompt guidance is still wrong for 64K, but the 20K char output truncation caps each iteration's damage.
+
+*** Code changes
+- [X] =max_tokens= CLI flag (default 65536) passed to =RLM()= constructor.
+- [X] =compaction=True= enabled in =RLM()= constructor.
+- [X] =MODEL_CONTEXT_LIMITS[model] = max_tokens= workaround when =base_url= is set -- RLM uses substring matching on model name to find context limits, and custom endpoints (e.g. ="openai/local"=) aren't in its built-in table, so it falls back to 128K and never compacts.
+- [X] =TokenLimitExceededError= caught in the main loop -- skips the example and continues.
+- [X] Switched from =verbose=True= to =verbose=False= + =RLMLogger(log_dir="rlm_logs")= for JSONL trajectory logging instead of noisy console output.
+- [X] Custom system prompt (=rlm_prompts.py=): copied RLM's =RLM_SYSTEM_PROMPT= into =_RLM_SYSTEM_PROMPT_TEMPLATE= with =__CHAR_LIMIT__= placeholders replacing the hardcoded "500K" on lines 12 and 40. =get_rlm_system_prompt(max_tokens)= scales the char limit based on context size: >=128K tokens -> 500K chars, 64-128K -> 250K, <64K -> 125K. Passed to RLM via =custom_system_prompt= kwarg.

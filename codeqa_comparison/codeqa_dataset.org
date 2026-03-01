@@ -1,0 +1,651 @@
+#+title: Codeqa Dataset
+
+
+CodeQA from LongBenchV2
+
+
+* How this dataset was prepared and what it contains  
+:PROPERTIES:
+:CREATED:  <2026-02-23 Mon> [18:41]
+:END:
+
+LongBench-v2 is a long-context benchmark created by THUDM (Tsinghua University), published at ACL 2025 (arXiv:2412.15204). It contains 503 multiple-choice questions across 6 domains, with context lengths ranging from 8k to 2M words. The data was collected from roughly 100 highly educated annotators with diverse professional backgrounds using a 5-step pipeline: document collection, question annotation under strict guidelines, automated review by a trio of LLMs to filter out easy questions, manual expert review, and revision until quality criteria are met. The difficulty standard requires that questions not be answerable within 3 minutes even when the annotator has access to search tools within the document. Human experts achieved only 53.7% accuracy under a 15-minute time constraint.
+
+The "Code Repository Understanding" domain is one of the 6 task categories (alongside single-document QA, multi-document QA, long in-context learning, long-dialogue history understanding, and long structured data understanding). It contains 50 questions where the context is the concatenated source code of an entire repository. As shown in the summary below, these contexts are very large -- ranging from ~3k to ~466k lines with a mean of ~97k lines. Each question has 4 answer choices (A/B/C/D) and is tagged with a sub_domain, difficulty level (easy/hard), and length category (short/medium/long). Notably, the contexts appear to be raw concatenations of source files without filename headers or path separators -- the paper does not describe the exact assembly method, and inspection of the data confirms no filenames are visible within the context strings.
+
+* Dataset summary
+:PROPERTIES:
+:CREATED:  <2026-02-23 Mon> [18:41]
+:END:
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+import datasets
+
+from datasets import load_dataset
+codeqa_df = load_dataset('THUDM/LongBench-v2', split='train').filter(lambda example: example["domain"] == "Code Repository Understanding").to_pandas()
+
+codeqa_df.columns
+#+END_SRC
+
+#+RESULTS:
+: Index(['_id', 'domain', 'sub_domain', 'difficulty', 'length', 'question',
+:        'choice_A', 'choice_B', 'choice_C', 'choice_D', 'answer', 'context'],
+:       dtype='object')
+
+
+Let's check out how many lines do these contexts have. 
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+codeqa_df["context"].str.split("\n").apply(len).describe()
+#+END_SRC
+
+#+RESULTS:
+: count        50.00000
+: mean      96662.28000
+: std      116264.21474
+: min        3040.00000
+: 25%       11185.50000
+: 50%       41880.00000
+: 75%      130593.00000
+: max      466252.00000
+: Name: context, dtype: float64
+
+These contexts are huge! They are indeed whole repo file contents!
+
+Let's count the number of functions
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+codeqa_df["context"].str.find("\ndef").describe()
+#+END_SRC
+
+#+RESULTS:
+: count    5.000000e+01
+: mean     1.422481e+05
+: std      8.614356e+05
+: min     -1.000000e+00
+: 25%      3.847500e+02
+: 50%      4.074500e+03
+: 75%      1.676250e+04
+: max      6.106301e+06
+: Name: context, dtype: float64
+
+
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+codeqa_df[["question", 'choice_A', 'choice_B', 'choice_C', 'choice_D']].iloc[0].to_dict()
+#+END_SRC
+
+#+RESULTS:
+: {'question': 'In the function that calculates the derivative of given functions, which of the following keyword arguments are all recognized?', 'choice_A': 'singular, addprec, function', 'choice_B': 'h, method, direction', 'choice_C': 'relative, fc, y', 'choice_D': 'radius, x, step'}
+
+* Identifying the source repositories
+:PROPERTIES:
+:CREATED:  <2026-02-24 Mon> [00:00]
+:END:
+
+The approach: heuristically split each context into chunks at likely file boundaries, then search GitHub for distinctive lines from each chunk to identify the actual file (repo + path).
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class FileChunk:
+    """A heuristically-split segment of the concatenated context."""
+    start_line: int
+    end_line: int
+    lines: list[str]
+    definitions: list[str] = field(default_factory=list)
+
+
+def split_into_chunks(ctx: str, min_chunk_lines: int = 20) -> list[FileChunk]:
+    """Split a concatenated context into chunks at likely file boundaries.
+
+    Heuristic: a new file starts when we see a file-preamble pattern at
+    column 0 (docstring, __future__ import, shebang, markdown heading,
+    cmake_minimum_required, etc.) preceded by a blank line, AND the
+    preceding non-blank line doesn't look like a def/class (which would
+    mean this is just a function/class docstring, not a new file).
+    """
+    lines = ctx.split("\n")
+    boundary_indices = [0]
+
+    for i in range(1, len(lines)):
+        line = lines[i]
+
+        # Must follow a blank line
+        if i > 0 and lines[i - 1].strip():
+            continue
+
+        is_preamble = (
+            line.startswith('"""')
+            or line.startswith("'''")
+            or line.startswith("from __future__")
+            or line.startswith("#!")
+            or line.startswith("# -*-")
+            or re.match(r"^cmake_minimum_required", line)
+            or re.match(r"^#\s+\w", line)  # markdown heading
+        )
+        if not is_preamble:
+            continue
+
+        # Look back past blanks -- if prev non-blank is def/class, skip
+        j = i - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        if j >= 0:
+            prev = lines[j].strip()
+            if prev.endswith(":") or prev.startswith("def ") or prev.startswith("class "):
+                continue
+            # Also skip if prev line looks like a docstring continuation
+            # (e.g. assignment to a r""" constant)
+            if prev.endswith('"""') or prev.endswith("'''"):
+                continue
+
+        # Don't create tiny chunks
+        if i - boundary_indices[-1] >= min_chunk_lines:
+            boundary_indices.append(i)
+
+    # Build chunks
+    chunks = []
+    for k in range(len(boundary_indices)):
+        start = boundary_indices[k]
+        end = boundary_indices[k + 1] if k + 1 < len(boundary_indices) else len(lines)
+        chunk_lines = lines[start:end]
+
+        defs = []
+        for cl in chunk_lines:
+            m = re.match(r"^(class|def)\s+(\w+)", cl)
+            if m:
+                defs.append(m.group(2))
+
+        chunks.append(FileChunk(
+            start_line=start, end_line=end,
+            lines=chunk_lines, definitions=defs,
+        ))
+
+    return chunks
+
+
+# Test on example 0 (mpmath)
+chunks = split_into_chunks(codeqa_df.iloc[0]["context"])
+[(c.start_line, c.end_line, c.end_line - c.start_line, c.definitions[:5]) for c in chunks]
+#+END_SRC
+
+#+RESULTS:
+|     0 |   498 |  498 | (round_fixed IdentificationMethods pslq findpoly fracgcd)                                                      |
+|   498 |   941 |  443 | (identify monitor timing)                                                                                      |
+|   941 |  1002 |   61 | (_mathfun_real _mathfun _mathfun_n)                                                                            |
+|  1002 |  1132 |  130 | (nthroot _sinpi_real _cospi_real _sinpi_complex _cospi_complex)                                                |
+|  1132 |  1187 |   55 | (_gamma_real _gamma_complex rgamma factorial arg)                                                              |
+|  1187 |  1299 |  112 | (loggamma _digamma_real _digamma_complex)                                                                      |
+|  1299 |  2154 |  855 | (_polyval _erf_taylor _erfc_mid _erfc_asymp erf)                                                               |
+|  2154 |  2652 |  498 | (FPContext create_reduced mpq)                                                                                 |
+|  2652 |  2980 |  328 | (VisualizationMethods plot default_color_function phase_color_function cplot)                                  |
+|  2980 |  4321 | 1341 | (MPContext PrecisionManager)                                                                                   |
+|  4321 |  4371 |   50 | nil                                                                                                            |
+|  4371 |  4507 |  136 | nil                                                                                                            |
+|  4507 |  4760 |  253 | nil                                                                                                            |
+|  4760 |  5543 |  783 | nil                                                                                                            |
+|  5543 |  5565 |   22 | nil                                                                                                            |
+|  5565 |  5695 |  130 | nil                                                                                                            |
+|  5695 |  5741 |   46 | nil                                                                                                            |
+|  5741 |  5844 |  103 | nil                                                                                                            |
+|  5844 |  5923 |   79 | nil                                                                                                            |
+|  5923 |  6008 |   85 | nil                                                                                                            |
+|  6008 |  6316 |  308 | nil                                                                                                            |
+|  6316 |  6388 |   72 | nil                                                                                                            |
+|  6388 |  6480 |   92 | nil                                                                                                            |
+|  6480 |  6551 |   71 | nil                                                                                                            |
+|  6551 |  6696 |  145 | nil                                                                                                            |
+|  6696 |  6751 |   55 | nil                                                                                                            |
+|  6751 |  6817 |   66 | nil                                                                                                            |
+|  6817 |  6887 |   70 | nil                                                                                                            |
+|  6887 |  6948 |   61 | nil                                                                                                            |
+|  6948 |  7100 |  152 | nil                                                                                                            |
+|  7100 |  7292 |  192 | nil                                                                                                            |
+|  7292 |  7339 |   47 | nil                                                                                                            |
+|  7339 |  7387 |   48 | nil                                                                                                            |
+|  7387 |  7466 |   79 | nil                                                                                                            |
+|  7466 |  7487 |   21 | nil                                                                                                            |
+|  7487 |  7508 |   21 | nil                                                                                                            |
+|  7508 |  7531 |   23 | nil                                                                                                            |
+|  7531 |  7616 |   85 | nil                                                                                                            |
+|  7616 |  7692 |   76 | nil                                                                                                            |
+|  7692 |  7934 |  242 | nil                                                                                                            |
+|  7934 |  8033 |   99 | nil                                                                                                            |
+|  8033 |  8095 |   62 | nil                                                                                                            |
+|  8095 |  8159 |   64 | nil                                                                                                            |
+|  8159 |  8288 |  129 | nil                                                                                                            |
+|  8288 |  8481 |  193 | nil                                                                                                            |
+|  8481 |  8548 |   67 | nil                                                                                                            |
+|  8548 |  8609 |   61 | nil                                                                                                            |
+|  8609 |  8640 |   31 | nil                                                                                                            |
+|  8640 |  8670 |   30 | nil                                                                                                            |
+|  8670 |  8956 |  286 | nil                                                                                                            |
+|  8956 |  9138 |  182 | nil                                                                                                            |
+|  9138 |  9182 |   44 | nil                                                                                                            |
+|  9182 |  9270 |   88 | nil                                                                                                            |
+|  9270 |  9441 |  171 | nil                                                                                                            |
+|  9441 |  9568 |  127 | nil                                                                                                            |
+|  9568 |  9673 |  105 | nil                                                                                                            |
+|  9673 |  9775 |  102 | nil                                                                                                            |
+|  9775 |  9879 |  104 | nil                                                                                                            |
+|  9879 | 10013 |  134 | nil                                                                                                            |
+| 10013 | 10063 |   50 | nil                                                                                                            |
+| 10063 | 10249 |  186 | nil                                                                                                            |
+| 10249 | 10324 |   75 | nil                                                                                                            |
+| 10324 | 10392 |   68 | nil                                                                                                            |
+| 10392 | 10457 |   65 | nil                                                                                                            |
+| 10457 | 10763 |  306 | nil                                                                                                            |
+| 10763 | 10817 |   54 | nil                                                                                                            |
+| 10817 | 10921 |  104 | nil                                                                                                            |
+| 10921 | 11058 |  137 | nil                                                                                                            |
+| 11058 | 11161 |  103 | nil                                                                                                            |
+| 11161 | 11236 |   75 | nil                                                                                                            |
+| 11236 | 11330 |   94 | nil                                                                                                            |
+| 11330 | 11353 |   23 | nil                                                                                                            |
+| 11353 | 11488 |  135 | nil                                                                                                            |
+| 11488 | 11523 |   35 | nil                                                                                                            |
+| 11523 | 11638 |  115 | nil                                                                                                            |
+| 11638 | 11743 |  105 | nil                                                                                                            |
+| 11743 | 11801 |   58 | nil                                                                                                            |
+| 11801 | 11892 |   91 | nil                                                                                                            |
+| 11892 | 12083 |  191 | nil                                                                                                            |
+| 12083 | 12208 |  125 | nil                                                                                                            |
+| 12208 | 12329 |  121 | nil                                                                                                            |
+| 12329 | 12398 |   69 | nil                                                                                                            |
+| 12398 | 12446 |   48 | nil                                                                                                            |
+| 12446 | 12485 |   39 | nil                                                                                                            |
+| 12485 | 12530 |   45 | nil                                                                                                            |
+| 12530 | 12592 |   62 | nil                                                                                                            |
+| 12592 | 12762 |  170 | nil                                                                                                            |
+| 12762 | 13383 |  621 | nil                                                                                                            |
+| 13383 | 13457 |   74 | nil                                                                                                            |
+| 13457 | 13587 |  130 | nil                                                                                                            |
+| 13587 | 13755 |  168 | nil                                                                                                            |
+| 13755 | 13900 |  145 | nil                                                                                                            |
+| 13900 | 14218 |  318 | nil                                                                                                            |
+| 14218 | 14298 |   80 | nil                                                                                                            |
+| 14298 | 14351 |   53 | nil                                                                                                            |
+| 14351 | 14386 |   35 | nil                                                                                                            |
+| 14386 | 14521 |  135 | nil                                                                                                            |
+| 14521 | 15661 | 1140 | (mpnumeric _mpf binary_op _constant _mpc)                                                                      |
+| 15661 | 16192 |  531 | (Context StandardBaseContext)                                                                                  |
+| 16192 | 16605 |  413 | nil                                                                                                            |
+| 16605 | 16641 |   36 | (runtests doctests)                                                                                            |
+| 16641 | 17433 |  792 | (LinearAlgebraMethods)                                                                                         |
+| 17433 | 18314 |  881 | (Eigen defun hessenberg_reduce_0 hessenberg_reduce_1 hessenberg)                                               |
+| 18314 | 18845 |  531 | (MatrixCalculusMethods)                                                                                        |
+| 18845 | 20657 | 1812 | (r_sy_tridiag c_he_tridiag_0 c_he_tridiag_1 c_he_tridiag_2 tridiag_eigen)                                      |
+| 20657 | 21709 | 1052 | (_matrix MatrixMethods ae test_basic_integrals test_multiple_intervals)                                        |
+| 21709 | 21736 |   27 | (test_double_trivial test_double_1 test_double_2 test_double_3 test_double_4)                                  |
+| 21736 | 22843 | 1107 | (test_expmath_integrals test_expmath_fail test_trig_misc_hard test_trig_near_zero test_trig_near_n_pi)         |
+| 22843 | 23437 |  594 | (run_eigsy run_eighe run_svd_r run_svd_c run_gauss)                                                            |
+| 23437 | 25139 | 1702 | (test_levin_0 test_levin_1 test_levin_2 test_levin_3 test_levin_nsum)                                          |
+| 25139 | 26403 | 1264 | (test_bessel_zeros_extra test_matrix_basic test_matmul test_matrix_slices test_matrix_power)                   |
+| 26403 | 26737 |  334 | (test_LU_decomp test_inverse test_householder test_factorization test_solve)                                   |
+| 26737 | 26929 |  192 | (test_axes test_fractional_pow test_pow_integer_direction test_pow_epsilon_rounding)                           |
+| 26929 | 27874 |  945 | (mpc_ae test_ellipfun test_calculate_nome test_jtheta test_jtheta_issue_79)                                    |
+| 27874 | 28118 |  244 | (run_hessenberg run_schur run_eig test_eig_dyn test_eig)                                                       |
+| 28118 | 28141 |   23 | nil                                                                                                            |
+| 28141 | 28165 |   24 | nil                                                                                                            |
+| 28165 | 28189 |   24 | nil                                                                                                            |
+| 28189 | 28225 |   36 | nil                                                                                                            |
+| 28225 | 28248 |   23 | nil                                                                                                            |
+| 28248 | 28321 |   73 | (test_hp)                                                                                                      |
+| 28321 | 28347 |   26 | (last_digits)                                                                                                  |
+| 28347 | 29111 |  764 | (test_log_hp test_exp_hp test_zeta_int_bug test_bernoulli test_bernpoly_eulerpoly)                             |
+| 29111 | 29454 |  343 | (test_bitcount test_trailing test_round_down test_round_up test_round_floor)                                   |
+| 29454 | 29844 |  390 | (test_add_rounding test_almost_equal test_arithmetic_functions test_exact_integer_arithmetic test_odd_int_bug) |
+| 29844 | 29958 |  114 | nil                                                                                                            |
+| 29958 | 29983 |   25 | nil                                                                                                            |
+| 29983 | 30059 |   76 | (test_ode1 test_ode2 test_odefun_rational test_odefun_sinc_large test_odefun_harmonic)                         |
+| 30059 | 30589 |  530 | (test_double_compatibility test_sqrt test_bugs test_interval_identity test_interval_hash)                      |
+| 30589 | 30610 |   21 | nil                                                                                                            |
+| 30610 | 32524 | 1914 | (ae test_conj test_fp_number_parts test_fp_cospi_sinpi test_fp_expj)                                           |
+| 32524 | 32551 |   27 | nil                                                                                                            |
+| 32551 | 32580 |   29 | nil                                                                                                            |
+| 32580 | 32687 |  107 | (testit)                                                                                                       |
+| 32687 | 32724 |   37 | nil                                                                                                            |
+| 32724 | 32913 |  189 | (test_asymp test_bernoulli_huge testit)                                                                        |
+| 32913 | 33496 |  583 | (find_rosser_block_zero wpzeros separate_zeros_in_block separate_my_zero sure_number_block)                    |
+| 33496 | 35734 | 2238 | (squarew trianglew sawtoothw unit_triangle sigmoid)                                                            |
+| 35734 | 35809 |   75 | (kampe_de_feriet bihyper)                                                                                      |
+| 35809 | 36046 |  237 | (stieltjes siegeltheta grampoint siegelz _load_zeta_zeros)                                                     |
+| 36046 | 36095 |   49 | (primepi2 primezeta)                                                                                           |
+| 36095 | 36193 |   98 | (bernpoly eulerpoly eulernum)                                                                                  |
+| 36193 | 37138 |  945 | (polylog_series polylog_continuation polylog_unitcircle polylog_general polylog)                               |
+| 37138 | 37778 |  640 | (expm1 log1p powm1 _rootof1 root)                                                                              |
+| 37778 | 38184 |  406 | (psi0 psi1 psi2 psi3 j0)                                                                                       |
+| 38184 | 38222 |   38 | (c_memo _airyai_C1 _airyai_C2 _airybi_C1 _airybi_C2)                                                           |
+| 38222 | 39188 |  966 | (_airyderiv_0 airyai airybi _airy_zero airyaizero)                                                             |
+| 39188 | 40755 | 1567 | (pcfy1 pcfy2 gegenbauer jacobi laguerre)                                                                       |
+| 40755 | 40803 |   48 | nil                                                                                                            |
+| 40803 | 42222 | 1419 | (RSCache _coef coef aux_M_Fp aux_J_needed)                                                                     |
+| 42222 | 43593 | 1371 | (eta nome qfrom qbarfrom taufrom)                                                                              |
+| 43593 | 44575 |  982 | (InverseLaplaceTransform FixedTalbot Stehfest deHoog Cohen)                                                    |
+| 44575 | 47518 | 2943 | (chebcoeff chebT chebyfit fourier fourierval)                                                                  |
+| 47518 | 47544 |   26 | (cartesian_product fold_finite)                                                                                |
+| 47544 | 47887 |  343 | (standardize_infinite fold_infinite nprod limit)                                                               |
+| 47887 | 49212 | 1325 | (polyval polyroots QuadratureRule TanhSinh GaussLegendre)                                                      |
+| 49212 | 49500 |  288 | (OptimizationMethods Newton Secant MNewton Halley)                                                             |
+| 49500 | 49668 |  168 | (Bisection _getm Illinois Pegasus Anderson)                                                                    |
+| 49668 | 49784 |  116 | (Ridder ANewton)                                                                                               |
+| 49784 | 49812 |   28 | (jacobian)                                                                                                     |
+| 49812 | 50324 |  512 | (MDNewton findroot multiplicity steffensen)                                                                    |
+| 50324 | 50385 |   61 | nil                                                                                                            |
+| 50385 | 50408 |   23 | (catalan_fixed)                                                                                                |
+| 50408 | 50429 |   21 | nil                                                                                                            |
+| 50429 | 50462 |   33 | (khinchin_fixed)                                                                                               |
+| 50462 | 50484 |   22 | nil                                                                                                            |
+| 50484 | 50551 |   67 | (glaisher_fixed)                                                                                               |
+| 50551 | 50575 |   24 | (apery_fixed)                                                                                                  |
+| 50575 | 50616 |   41 | (euler_fixed)                                                                                                  |
+| 50616 | 51091 |  475 | (mertens_fixed twinprime_fixed bernoulli_size mpf_bernoulli mpf_bernoulli_huge)                                |
+| 51091 | 51467 |  376 | (mpf_psi mpc_psi borwein_coefficients mpf_zeta_int mpf_zeta)                                                   |
+| 51467 | 51572 |  105 | (pow_fixed primesieve zetasum_sieved)                                                                          |
+| 51572 | 51681 |  109 | (mpc_zetasum)                                                                                                  |
+| 51681 | 52493 |  812 | (zeta_array gamma_taylor_coefficients gamma_fixed_taylor stirling_coefficient real_stirling_series)            |
+| 52493 | 52532 |   39 | nil                                                                                                            |
+| 52532 | 52627 |   95 | (constant_memo def_mpf_constant bsp_acot)                                                                      |
+| 52627 | 52651 |   24 | (acot_fixed machin)                                                                                            |
+| 52651 | 52695 |   44 | (ln2_fixed ln10_fixed)                                                                                         |
+| 52695 | 52874 |  179 | (bs_chudnovsky pi_fixed degree_fixed bspe e_fixed)                                                             |
+| 52874 | 53368 |  494 | (nthroot_fixed mpf_nthroot mpf_cbrt log_int_fixed agm_fixed)                                                   |
+| 53368 | 53923 |  555 | (mpf_atan2 mpf_asin mpf_acos mpf_asinh mpf_acosh)                                                              |
+| 53923 | 53954 |   31 | nil                                                                                                            |
+| 53954 | 54506 |  552 | (mpc_is_inf mpc_is_infnan mpc_to_str mpc_to_complex mpc_hash)                                                  |
+| 54506 | 54760 |  254 | (mpc_atan acos_asin mpc_acos mpc_asin mpc_asinh)                                                               |
+| 54760 | 54812 |   52 | (NoConvergence)                                                                                                |
+| 54812 | 55091 |  279 | (make_hyp_summator)                                                                                            |
+| 55091 | 55134 |   43 | (mpf_erf)                                                                                                      |
+| 55134 | 55651 |  517 | (erfc_check_series mpf_erfc ei_taylor complex_ei_taylor ei_asymptotic)                                         |
+| 55651 | 55673 |   22 | nil                                                                                                            |
+| 55673 | 55912 |  239 | (mpf_besseljn mpc_besseljn mpf_agm mpf_agm1 mpc_agm)                                                           |
+| 55912 | 55999 |   87 | (giant_steps rshift lshift python_trailing)                                                                    |
+| 55999 | 56036 |   37 | (python_bitcount gmpy_bitcount sage_trailing)                                                                  |
+| 56036 | 56394 |  358 | (bin_to_radix small_numeral numeral_python numeral_gmpy isqrt_small_python)                                    |
+| 56394 | 56498 |  104 | (eulernum stirling1 stirling2)                                                                                 |
+| 56498 | 56621 |  123 | (mpi_str mpi_eq mpi_ne mpi_lt mpi_le)                                                                          |
+| 56621 | 57310 |  689 | (mpi_mul_mpf mpi_div_mpf mpi_mul mpi_square mpi_div)                                                           |
+| 57310 | 57447 |  137 | (mpi_gamma mpci_gamma mpi_loggamma mpci_loggamma mpi_rgamma)                                                   |
+| 57447 | 57485 |   38 | (from_pickable ComplexResult)                                                                                  |
+| 57485 | 57516 |   31 | (prec_to_dps dps_to_prec repr_dps)                                                                             |
+| 57516 | 57539 |   23 | nil                                                                                                            |
+| 57539 | 57564 |   25 | (round_int)                                                                                                    |
+| 57564 | 57584 |   20 | (h_mask_big)                                                                                                   |
+| 57584 | 58779 | 1195 | (_normalize _normalize1 strict_normalize strict_normalize1 from_man_exp)                                       |
+| 58779 | 58949 |  170 | (from_bstr to_bstr mpf_sqrt mpf_hypot)                                                                         |
+| 58949 | 58985 |   36 | nil                                                                                                            |
+| 58985 | 59045 |   60 | nil                                                                                                            |
+
+** Identifying files via GitHub code search
+
+Once we have chunks, we take the first 20 lines of each, pick the longest non-blank line, and do an exact-match search on GitHub. The API returns both the repo and the file path, so we recover the filename directly.
+
+*Rate limit warning*: GitHub code search allows ~10 req/min unauthenticated, ~30 req/min authenticated. With 50 contexts and potentially dozens of chunks each, a naive run would hit thousands of queries. In practice we should:
+- Sample chunks (e.g. every Nth) rather than searching all of them
+- Stop searching a context once we know the repo, then match remaining chunks locally against the repo's file tree
+- Add =time.sleep= between requests
+- Cache results to avoid re-querying across runs
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+import subprocess, json, time
+
+
+@dataclass
+class FileMatch:
+    """Result of searching GitHub for a chunk."""
+    chunk_start: int
+    repo: str
+    path: str
+    query: str
+
+
+def pick_query_line(chunk_lines: list[str], n: int = 20) -> str:
+    """Pick the longest non-blank line from the first n lines of a chunk."""
+    candidates = [l.strip() for l in chunk_lines[:n] if len(l.strip()) > 30]
+    if not candidates:
+        candidates = [l.strip() for l in chunk_lines[:n] if l.strip()]
+    return candidates[0] if candidates else ""
+
+
+def search_chunk(chunk: FileChunk, sleep: float = 6.0) -> FileMatch | None:
+    """Search GitHub code for the chunk's first distinctive line."""
+    query = pick_query_line(chunk.lines)
+    if not query:
+        return None
+    result = subprocess.run(
+        ["gh", "api", "search/code", "-X", "GET",
+         "-f", f'q="{query}"',
+         "-f", "per_page=1"],
+        capture_output=True, text=True,
+    )
+    time.sleep(sleep)  # respect rate limit
+    data = json.loads(result.stdout)
+    items = data.get("items", [])
+    if not items:
+        return None
+    return FileMatch(
+        chunk_start=chunk.start_line,
+        repo=items[0]["repository"]["full_name"],
+        path=items[0]["path"],
+        query=query,
+    )
+#+END_SRC
+
+#+RESULTS:
+: None
+
+Test on mpmath (example 0), searching every 3rd chunk:
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both :async
+import tqdm
+
+matches = []
+for chunk in tqdm.tqdm(chunks[:5]):
+    m = search_chunk(chunk)
+    if m:
+        matches.append(m)
+
+[(m.chunk_start, m.repo, m.path) for m in matches]
+#+END_SRC
+
+#+RESULTS:
+|    0 | mpmath/mpmath      | mpmath/identification.py             |
+|  498 | mpmath/mpmath      | mpmath/identification.py             |
+|  941 | mpmath/mpmath      | mpmath/libfp.py                      |
+| 1002 | escheffel/pymaclab | sympycore/arithmetic/mpmath/math2.py |
+| 1132 | mpmath/mpmath      | mpmath/libfp.py                      |
+
+Over-split chunks just map to the same file, which is fine -- consecutive chunks with the same path can be merged.
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+len(chunks)
+#+END_SRC
+
+#+RESULTS:
+: 206
+
+** Two-phase repo identification
+
+Phase 1: search a handful of chunks on GitHub to identify the repo. Phase 2: shallow-clone the repo and match all chunks locally via substring search.
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+from collections import Counter
+
+def identify_repo(chunks: list[FileChunk], max_searches: int = 5, sleep: float = 6.0) -> str | None:
+    """Search a few chunks on GitHub and return the most common repo name.
+
+    Searches up to max_searches evenly-spaced chunks and takes a majority
+    vote on the repo, since occasionally a search returns a fork or
+    vendored copy.
+    """
+    step = max(1, len(chunks) // max_searches)
+    sampled = chunks[::step][:max_searches]
+
+    repos = []
+    for chunk in sampled:
+        m = search_chunk(chunk, sleep=sleep)
+        if m:
+            repos.append(m.repo)
+    if not repos:
+        return None
+    return Counter(repos).most_common(1)[0][0]
+
+
+identify_repo(chunks)
+#+END_SRC
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+import tempfile, os
+
+def clone_repo(repo: str, dest: str | None = None) -> str:
+    """Shallow-clone a GitHub repo and return the local path."""
+    if dest is None:
+        dest = os.path.join(tempfile.mkdtemp(), repo.split("/")[-1])
+    subprocess.run(
+        ["git", "clone", "--depth", "1", f"https://github.com/{repo}.git", dest],
+        capture_output=True, text=True, check=True,
+    )
+    return dest
+
+
+def read_repo_files(repo_path: str) -> dict[str, str]:
+    """Read all text files from a cloned repo into a dict of {relative_path: content}."""
+    files = {}
+    for root, dirs, filenames in os.walk(repo_path):
+        # skip .git
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for fname in filenames:
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, repo_path)
+            try:
+                with open(fpath, "r", errors="ignore") as f:
+                    files[rel] = f.read()
+            except (OSError, UnicodeDecodeError):
+                pass
+    return files
+
+
+def match_chunk_locally(chunk: FileChunk, repo_files: dict[str, str], snippet_lines: int = 5) -> str | None:
+    """Find which repo file contains a chunk by searching for a snippet.
+
+    Takes the first snippet_lines non-blank lines from the chunk and looks
+    for all of them in each file. Returns the file path or None.
+    """
+    snippet = [l for l in chunk.lines[:20] if l.strip()][:snippet_lines]
+    if not snippet:
+        return None
+    for path, content in repo_files.items():
+        if all(line in content for line in snippet):
+            return path
+    return None
+
+
+def match_all_chunks(chunks: list[FileChunk], repo_files: dict[str, str]) -> list[tuple[int, int, str | None]]:
+    """Match every chunk to a file in the repo.
+
+    Returns list of (start_line, end_line, file_path_or_None).
+    """
+    return [(c.start_line, c.end_line, match_chunk_locally(c, repo_files)) for c in chunks]
+#+END_SRC
+
+Test the full pipeline on example 0 (mpmath):
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+repo_name = "mpmath/mpmath"  # already identified above
+repo_path = clone_repo(repo_name)
+repo_files = read_repo_files(repo_path)
+mapping = match_all_chunks(chunks, repo_files)
+
+# show matched vs unmatched
+matched = sum(1 for _, _, p in mapping if p is not None)
+f"{matched}/{len(mapping)} chunks matched to files"
+#+END_SRC
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+# unique files found
+sorted(set(p for _, _, p in mapping if p is not None))
+#+END_SRC
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+# show first 20 mappings
+mapping[:20]
+#+END_SRC
+
+
+** Fragments matched with filenames 
+:PROPERTIES:
+:CREATED:  <2026-02-27 Fri> [17:17]
+:END:
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+import pandas as pd
+df = pd.read_parquet("files.parquet")
+df.columns
+#+END_SRC
+
+#+RESULTS:
+: Index(['_id', 'repo', 'segment', 'filename', 'start_line', 'end_line', 'text'], dtype='object')
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+df["filename"].isna().mean()
+#+END_SRC
+
+#+RESULTS:
+: 0.09555679494329801
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+df["filename"]
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+0                        mpmath/identification.py
+1                                 mpmath/libfp.py
+2                                mpmath/ctx_iv.py
+3                                            None
+4                         mpmath/visualization.py
+                          ...                    
+5374        networkx/readwrite/tests/test_gexf.py
+5375        networkx/readwrite/tests/test_text.py
+5376       networkx/readwrite/tests/test_pajek.py
+5377     networkx/readwrite/tests/test_adjlist.py
+5378    networkx/readwrite/json_graph/__init__.py
+Name: filename, Length: 5379, dtype: object
+#+end_example
+
+
+** All the contexts put back together with filenames
+:PROPERTIES:
+:CREATED:  <2026-03-01 Sun> [13:36]
+:END:
+
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+import pandas as pd
+annotated_df = pd.read_parquet("annotated_dataset.parquet")
+annotated_df.columns
+#+END_SRC
+
+#+RESULTS:
+: Index(['_id', 'domain', 'sub_domain', 'difficulty', 'length', 'question',
+:        'choice_A', 'choice_B', 'choice_C', 'choice_D', 'answer', 'context',
+:        'instruction_suffix', 'n_segments', 'n_matched', 'repo'],
+:       dtype='object')
+
+#+BEGIN_SRC python :session codeqa_dataset.org  :exports both
+annotated_df.head()
+#+END_SRC
+
+#+RESULTS:
+:                         _id                         domain    sub_domain  ... n_segments n_matched                      repo
+: 0  66ebd3ba5a08c7b9b35e0446  Code Repository Understanding  Code repo QA  ...         63        63           3DTopia/OpenLRM
+: 1  66ebdd1c5a08c7b9b35e113b  Code Repository Understanding  Code repo QA  ...         60        32  huggingface/transformers
+: 2  66ec3644821e116aacb1c312  Code Repository Understanding  Code repo QA  ...          8         8     Doubiiu/DynamiCrafter
+: 3  66ec56dd821e116aacb1cd0e  Code Repository Understanding  Code repo QA  ...         16        14     princeton-nlp/webshop
+: 4  66ece545821e116aacb1dd77  Code Repository Understanding  Code repo QA  ...          1         0         chalk/ansi-styles
+: 
+: [5 rows x 16 columns]
