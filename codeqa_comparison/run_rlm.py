@@ -89,6 +89,7 @@ def main(
     output: Optional[str] = None,
     dataset: str = "original",
     max_tokens: int = 40960,
+    environment: str = "pyodide",
     log_dir: Optional[str] = "rlm_logs",
     verbose: bool = False,
 ):
@@ -100,6 +101,7 @@ def main(
         output: Path to the output JSONL file.
         dataset: "original" or "annotated".
         max_tokens: Maximum total tokens (input + output) for RLM.
+        environment: RLM REPL environment ("pyodide" or "local").
         log_dir: Directory for RLM JSONL logs. Set to None to disable.
         verbose: Enable RLM verbose console output.
     """
@@ -122,6 +124,7 @@ def main(
     rlm = RLM(
         backend="litellm",
         backend_kwargs=backend_kwargs,
+        environment=environment,
         max_tokens=max_tokens,
         compaction=True,
         custom_system_prompt=get_rlm_system_prompt(max_tokens),
