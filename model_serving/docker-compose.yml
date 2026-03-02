@@ -1,0 +1,20 @@
+services:
+  llama-server:
+    # this was ONLY tested on RTX 3090
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports:
+      - 8080:8080
+    volumes:
+      - ~/.cache/llama.cpp:/root/.cache/llama.cpp
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --hf-repo cameronbergh/rlm-qwen3-8b-v0.1-gguf
+      --hf-file rlm-qwen3-8b-v0.1-q8_0.gguf
+      -c 40960
+      --temp 0
