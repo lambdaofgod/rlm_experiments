@@ -1,0 +1,22 @@
+traces_endpoint: "http://localhost:6006/v1/traces"
+traces_project: "dspy-sft-longbench"
+
+lm:
+  model: "openrouter/qwen/qwen3.5-122B-A10B"
+  max_tokens: 32000
+dataset:
+  path: "longbench_pro_en.parquet"
+  label_field: "answer"
+  prompt_template:
+    context: "{context}"
+    query: "{question_nonthinking}"
+
+module:
+  type: "RLM"
+  signature: "context, query -> answer"
+  kwargs: {}
+
+collection:
+  num_threads: 1
+  metric: "always_true"
+  output_dir: "./sft_data"

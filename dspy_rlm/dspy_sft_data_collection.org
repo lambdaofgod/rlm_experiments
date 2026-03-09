@@ -1,0 +1,193 @@
+#+title: DSPy SFT Data Collection
+
+* Overview
+
+The goal is to collect SFT training data from a DSPy program using a
+teacher LM (e.g. GPT-4o or Claude), filter it by a metric, and write
+JSONL formatted exactly as DSPy's ~ChatAdapter~ would format it at
+inference time — so a finetuned student will respond correctly when
+served back through DSPy signatures.
+
+Training itself is out of scope here. This document covers the
+collection pipeline only. ~BootstrapFinetune~ already implements the
+full collection pipeline internally; we use it directly rather than
+reimplementing it.
+
+* Core Insight: What Format Do We Need?
+
+The critical constraint is that the training data must match the exact
+prompt format DSPy uses at inference time. This means we cannot just
+capture raw inputs/outputs — we must render them through
+~adapter.format_finetune_data()~, which:
+
+1. Builds the full message list the adapter would send (system prompt,
+   few-shot demos, the user turn with signature fields)
+2. Appends the assistant completion in the adapter's structured format
+   (e.g. JSON fields, XML fields, or plain text depending on adapter)
+
+If you skip this step and train on generic chat data, the finetuned
+model will fail to produce outputs that DSPy's output parser can
+extract field values from.
+
+* Pipeline Architecture
+
+#+BEGIN_EXAMPLE
+trainset (dspy.Example list)
+        │
+        ▼
+┌───────────────────┐
+│  Teacher Program  │  ← large/capable LM (e.g. gpt-4o-mini)
+│  (dspy.Module)    │    running your DSPy signatures
+└───────────────────┘
+        │  traces: [(predictor, inputs, outputs), ...]
+        ▼
+┌───────────────────┐
+│  Metric Filter    │  ← keep only traces from successful runs
+└───────────────────┘
+        │  filtered traces
+        ▼
+┌───────────────────┐
+│ format_finetune_  │  ← adapter renders full prompt + completion
+│ data()            │    in the exact DSPy wire format
+└───────────────────┘
+        │  {"messages": [...], "completion": "..."}
+        ▼
+┌───────────────────┐
+│  JSONL on disk    │  ← ready for Unsloth / TRL / axolotl
+└───────────────────┘
+#+END_EXAMPLE
+
+* What BootstrapFinetune Actually Does
+
+~BootstrapFinetune.compile()~ does the following in order:
+
+1. *Run the teacher program* over the entire trainset in parallel
+   (using ~dspy.Evaluate~ with threading). Each run captures a trace
+   of ~(predictor, inputs, outputs)~ tuples via ~dspy.context(trace=[])~.
+
+2. *Filter by metric* (if provided). Traces from examples where the
+   program output did not pass the metric are discarded.
+
+3. *Format via the adapter*. For each surviving trace step, calls
+   ~adapter.format_finetune_data(signature, demos, inputs, outputs)~
+   to render the full prompt + completion pair in the exact wire format
+   the adapter uses at inference time.
+
+4. *Write JSONL to disk* under ~DSPY_FINETUNEDIR~ before training starts.
+
+5. *Call ~lm.finetune(...)~* to start the actual training job. This is
+   the only step we want to suppress.
+
+Steps 1–4 are what we need. Step 5 is what we stub out.
+
+* Implementation
+
+Subclass ~BootstrapFinetune~ and stub out ~lm.finetune~ so it returns
+immediately without training. Everything up to and including writing
+the JSONL still happens.
+
+#+BEGIN_SRC python
+import os
+import dspy
+from dspy.teleprompt import BootstrapFinetune
+
+os.environ["DSPY_FINETUNEDIR"] = "./sft_data"
+
+class SFTDataCollector(BootstrapFinetune):
+    def compile(self, student, trainset, teacher=None):
+        lms = {pred.lm or dspy.settings.lm for pred in student.predictors()}
+        for lm in lms:
+            lm.finetune = lambda *a, **kw: type(
+                "NoOpJob", (), {"result": lambda self: lm}
+            )()
+        return super().compile(student, trainset=trainset, teacher=teacher)
+#+END_SRC
+
+* Usage Example
+
+#+BEGIN_SRC python
+import dspy
+
+dspy.configure(lm=dspy.LM("openai/gpt-4o-mini", max_tokens=2000))
+
+class MyRLMProgram(dspy.Module):
+    def __init__(self):
+        self.step1 = dspy.ChainOfThought("question -> answer")
+
+    def forward(self, question):
+        return self.step1(question=question)
+
+program = MyRLMProgram()
+
+def metric(example, prediction, trace=None):
+    return prediction.answer.strip().lower() == example.answer.strip().lower()
+
+trainset = [
+    dspy.Example(question="What is 2+2?", answer="4").with_inputs("question"),
+    # ...
+]
+
+collector = SFTDataCollector(metric=metric, num_threads=16)
+collector.compile(student=program, trainset=trainset, teacher=program)
+# JSONL is now in ./sft_data/, ready for Unsloth
+#+END_SRC
+
+* Caveats and Practical Notes
+
+** Adapter compatibility
+
+The ~format_finetune_data()~ method is defined on ~dspy.ChatAdapter~
+(the default since DSPy 2.6). If you switch to ~dspy.JSONAdapter~ or
+~dspy.XMLAdapter~, the wire format changes — make sure the adapter
+used during data collection matches the one the student will use at
+inference time.
+
+The safest approach is to explicitly set the adapter before collection
+and hardcode it for inference:
+
+#+BEGIN_SRC python
+adapter = dspy.ChatAdapter()
+dspy.configure(adapter=adapter)
+#+END_SRC
+
+** Reasoning fields for RLM
+
+For RLM-style SFT you want the ~reasoning~ field preserved in the
+completions. Using ~dspy.ChainOfThought~ instead of ~dspy.Predict~
+adds ~reasoning~ as a typed output field in the signature, so
+~format_finetune_data()~ will automatically include it in the
+assistant completion. No extra work needed.
+
+** Multi-module programs
+
+For programs with multiple predictors, each trace step becomes a
+separate training record (one per ~dspy.Predict~ call in the
+pipeline). The ~multitask=True~ default in ~BootstrapFinetune~
+combines all module traces into one dataset, which is correct for a
+single student model.
+
+** Teacher quality matters more than quantity
+
+A few hundred high-quality filtered traces from a strong teacher
+(GPT-4o, Claude Sonnet) beat thousands of unfiltered ones. Run with
+a strict metric first.
+
+** Verify a sample before training
+
+Before handing the JSONL to Unsloth, sanity-check a few records:
+
+#+BEGIN_SRC python
+with open("data/sft_train.jsonl") as f:
+    sample = json.loads(f.readline())
+
+# Inspect the message structure
+for msg in sample["messages"]:
+    print(f"[{msg['role']}]")
+    print(msg["content"][:300])
+    print()
+#+END_SRC
+
+The ~messages~ list should look like a standard OpenAI chat format,
+with the system prompt encoding the DSPy signature instructions,
+optional few-shot demo turns, a user turn with field values, and an
+assistant turn containing the structured output.

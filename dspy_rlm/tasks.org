@@ -1,0 +1,140 @@
+#+title: DSPy SFT Data Collection - Tasks
+
+* Overview
+
+Collect SFT training data from a DSPy program (teacher LM), filter by
+metric, and write JSONL in DSPy's ChatAdapter format -- ready for
+finetuning with Unsloth/TRL. Based on the ~SFTDataCollector~ pattern
+from [[file:dspy_sft_data_collection.org][dspy_sft_data_collection.org]]. The DSPy module type
+(ChainOfThought, RLM, etc.) is configurable via YAML.
+
+* Files to create/modify
+
+| File                 | Action                          |
+|----------------------+---------------------------------|
+| ~pyproject.toml~     | Add ~dspy~, ~pyyaml~ via uv add |
+| ~config.yaml~        | New -- YAML config              |
+| ~collect_sft_data.py~ | New -- main CLI script         |
+| ~verify_data.py~     | New -- JSONL inspection script  |
+
+* Tasks
+
+** DONE Add dependencies
+   - [X] ~uv add dspy pyyaml~
+
+** DONE Create ~config.yaml~
+   - [X] Define ~lm~ section (model, max_tokens)
+   - [X] Define ~dataset~ section (path, label_field, prompt_template)
+     - ~prompt_template~ maps module signature fields to formatted dataset columns
+     - e.g. ~context: "{context}"~, ~query: "{question}\nA: {choice_A}\n..."~
+   - [X] Define ~module~ section (type, signature, kwargs)
+     - ~signature~ defaults to ~"context, query -> answer"~
+   - [X] Define ~collection~ section (num_threads, output_dir)
+
+** DONE Create ~collect_sft_data.py~
+   - [X] ~SFTDataCollector(BootstrapFinetune)~ -- stub ~lm.finetune~
+   - [X] ~load_dataset(path, label_field, prompt_template)~ -- parquet/csv to ~list[dspy.Example]~
+     - Render each row through ~prompt_template~ to produce module input fields
+     - Attach ~label_field~ as ~answer~ for metric
+   - [X] ~exact_match_metric~ -- case-insensitive comparison on ~answer~
+   - [X] ~build_program(module_type, signature, kwargs)~ -- ~getattr(dspy, type_str)~
+   - [X] ~main(config_path)~ -- fire CLI entry point
+
+
+   
+** TODO Transform LongBench-Pro questions for RLM compatibility
+   LongBench-Pro questions include their own ~[Answer]~ output format
+   instructions and ~Output example:~ blocks.  This conflicts with RLM's
+   ~SUBMIT()~ mechanism -- the model constructs answers in code blocks
+   instead of calling ~SUBMIT(answer=...)~ directly.
+   - [ ] Add ~transform_question(text) -> str~ in ~data_utils.py~
+     - Strip ~Output example:~ block and everything after it
+     - Strip the ~Output the "[Answer]" identifier first...~ sentence
+     - Append SUBMIT-compatible hint, e.g. ~SUBMIT(answer=["val1", "val2"])~
+   - [ ] Apply transform to both ~question_nonthinking~ and ~question_thinking~ in ~prepare_longbench_pro()~
+   - [ ] Regenerate ~longbench_pro_en.parquet~ and ~sample_longbench_pro_en.parquet~
+   - [ ] Spot-check transformed questions across different task types
+
+** TODO quickfix for no examples issue
+
+Right now there are problems with "metric" - it almost always says the answer is wrong, which means it makes sense to just disable it so it always says the answer is right - we will add this validation in another step because for RLM some answers might just have a little wrong format which we should be able to recover
+
+** TODO Create ~verify_data.py~
+   - [ ] Read JSONL files from output dir
+   - [ ] Print n sample records (roles + content)
+   - [ ] Print total record count
+   - [ ] Fire CLI entry point
+
+** TODO Verify end-to-end
+   - [ ] Run ~collect_sft_data.py~ with 1-row test parquet
+   - [ ] Check ~./sft_data/*.jsonl~ exists
+   - [ ] Run ~verify_data.py~ to inspect output
+   - [ ] Confirm OpenAI chat format with DSPy signature structure
+
+** DONE Implement ~CustomizableRLM~
+   See [[file:customized_rlm.org][customized_rlm.org]] for full specification.
+   - [X] Read upstream ~rlm.py~ to confirm method names and injection points
+   - [X] Implement ~CustomizableRLM.__init__~ (~sub_lm_context_tokens~, ~small_model_tips~, ~safety_factor~)
+   - [X] Implement ~chars_for_sub_lm~ static helper (token path, LM path, precedence)
+   - [X] Override ~_get_system_prompt~ (or post-init patch) to replace capacity figure
+   - [X] Implement ~_inject_tips~ (batching block + context-length warning for <=100k)
+
+** DONE Test ~CustomizableRLM~
+   - [X] Unit tests for prompt string mutations
+   - [X] Unit tests for ~chars_for_sub_lm~ (token-only, LM-only, both, neither)
+   - [ ] Integration smoke test with ~MockInterpreter~ at 100k setting
+
+** TODO Parse RLM output and evaluate with LongBench-Pro metrics
+
+   RLM output (SFT JSONL trajectory) contains SUBMIT calls with answers
+   that may need parsing/normalization.  LongBench-Pro uses 6 different
+   metrics depending on ~secondary_task~.  We need a script that:
+
+   1. Parses RLM answers from the collected SFT data (extract the value
+      passed to ~SUBMIT(answer=...)~ -- handle both literal values and
+      variable references like ~SUBMIT(answer=answer)~)
+   2. Joins predictions back to the dataset to get gold answers and
+      ~secondary_task~
+   3. Evaluates using the correct metric per question
+
+*** Metric mapping (~secondary_task~ -> metric)
+
+    | secondary_task | Metric            | Description                                          |
+    |----------------+-------------------+------------------------------------------------------|
+    | T1.1, T1.2     | NDCG              | Ranking quality; gold positions = relevance scores    |
+    | T2.1, T2.2     | Pairwise_Accuracy | Fraction of item pairs in correct relative order      |
+    | T3.1, T3.2     | Accuracy          | Exact match on first element only                    |
+    | T4.1, T4.2     | Summary           | 0.5*SemSim + 0.5*ROUGE-L (needs embedding model)    |
+    | T5.1, T5.2     | F1_Score          | Set-level F1 over answer elements                    |
+    | T6.1           | SubEM             | Fraction of gold elements present in prediction      |
+    | T6.2           | F1_Score          | Set-level F1                                         |
+    | T6.3           | Pairwise_Accuracy | Pair ordering                                        |
+    | T7.1-T7.3      | F1_Score          | Set-level F1                                         |
+    | T8.1-T8.3      | SubEM             | Subset exact match                                   |
+    | T9.1, T9.2     | F1_Score          | Set-level F1                                         |
+    | T10.1, T10.2   | SubEM             | Subset exact match                                   |
+    | T11.1, T11.2   | Accuracy          | Exact match on first element                         |
+
+*** Metrics to implement
+
+    - [ ] ~accuracy(gold, pred)~ -- compare first elements, case-insensitive
+    - [ ] ~sub_em(gold, pred)~ -- fraction of gold list found in pred list
+    - [ ] ~f1_score(gold, pred)~ -- set intersection F1
+    - [ ] ~pairwise_accuracy(gold, pred)~ -- pair ordering fraction
+    - [ ] ~ndcg(gold, pred)~ -- use ~pytrec_eval~ or manual NDCG@k
+    - [ ] ~summary_score(gold, pred)~ -- SKIP or stub (requires Qwen3-Embedding-8B for SemSim)
+
+*** Subtasks
+
+    - [X] Create ~evaluate.py~ with metric functions and CLI
+    - [X] Answer parser: extract answer from DSPy ChatAdapter field format,
+          normalize (lowercase, strip, parse JSON/list/csv)
+    - [X] Map ~secondary_task~ to metric function via dict
+    - [X] Join SFT output with dataset by row index
+    - [X] Aggregate scores: per-task, per-metric, overall
+    - [X] NDCG implemented manually (no pytrec-eval dependency)
+    - [ ] Run on actual SFT output and verify results
+
+** TODO Document ~CustomizableRLM~
+   - [ ] Docstrings on class and ~chars_for_sub_lm~
+   - [ ] Entry in ~CHANGELOG.md~

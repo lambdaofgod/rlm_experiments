@@ -1,0 +1,22 @@
+traces_endpoint: "http://localhost:6006/v1/traces"
+traces_project: "dspy-sft-longbench-sample-opus"
+
+lm:
+  model: "openrouter/anthropic/claude-opus-4.6"
+  max_tokens: 32000
+dataset:
+  path: "sample_longbench_pro_en.parquet"
+  label_field: "answer"
+  prompt_template:
+    context: "{context}"
+    query: "{question_nonthinking}"
+
+module:
+  type: "RLM"
+  signature: "context, query -> answer"
+  kwargs: {}
+
+collection:
+  num_threads: 1
+  metric: "always_true"
+  output_dir: "./opus_sft_data"

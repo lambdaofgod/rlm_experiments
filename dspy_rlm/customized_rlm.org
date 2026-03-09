@@ -1,0 +1,269 @@
+#+TITLE: CustomizableRLM -- Specification
+#+AUTHOR: Engineering
+#+DATE: 2026-03-09
+#+OPTIONS: toc:2 num:t ^:nil
+#+STARTUP: showall
+
+* Overview
+
+=CustomizableRLM= is a subclass of =dspy.RLM= that replaces the hardcoded
+=500K chars= capacity assumption in the system prompt with a runtime
+parameter.  The hardcoded figure is safe for frontier models with million-token
+context windows but silently causes truncation or crashes when the sub-LLM has
+a small context.  A companion flag, =small_model_tips=, conditionally injects
+cost-and-batching guidance derived from the same parameter so the prompt stays
+internally consistent.
+
+** Motivation
+
+The upstream =REPL_SYSTEM_PROMPT.txt= tells the orchestrator LLM:
+
+#+BEGIN_QUOTE
+"A =llm_query= function that allows you to query an LLM (that can handle
+around 500K chars) inside your REPL environment."
+#+END_QUOTE
+
+If =sub_lm= is e.g. Qwen3-8B (~32k tokens ~ 100k chars), the orchestrator
+will happily pack 500k-character chunks into each =llm_query= call, blowing
+the sub-LLM's context every time.  Previous workarounds hand-edit a separate
+prompt file per model family -- this task generalises that into a single,
+documented parameter.
+
+* Source Reference
+
+| File | Commit |
+|------|--------|
+| =dspy/predict/rlm.py= | =1ff12dd= (stanfordnlp/dspy) |
+
+The relevant hardcoded strings are in =_get_system_prompt()= (or the constant
+that feeds it) around line 78.
+
+* File
+
+#+BEGIN_SRC
+customizable_rlm.py
+#+END_SRC
+
+* Class Signature
+
+#+BEGIN_SRC python
+class CustomizableRLM(dspy.RLM):
+    """RLM subclass with a parametrizable sub-LLM context budget.
+
+    The character limit advertised to the orchestrator for each llm_query()
+    call is derived from sub_lm_context_tokens (authoritative) or sub_lm
+    (best-effort litellm lookup), with sub_lm_context_tokens taking precedence
+    when both are supplied.  All other RLM constructor arguments are forwarded
+    via **kwargs.
+    """
+
+    def __init__(
+        self,
+        signature: type[dspy.Signature] | str,
+        *,
+        sub_lm_context_tokens: int | None = None,
+        small_model_tips: bool = False,
+        **kwargs,   # forwarded: max_iterations, sub_lm, interpreter, ...
+    ) -> None:
+        ...
+
+    @staticmethod
+    def chars_for_sub_lm(
+        sub_lm_context_tokens: int | None = None,
+        lm: dspy.LM | None = None,
+        safety_factor: float = 0.8,
+    ) -> int:
+        """Derive the char limit from a token count, an LM object, or both.
+
+        If both are provided, sub_lm_context_tokens takes precedence.
+        At least one must be supplied.
+        """
+        ...
+#+END_SRC
+
+* Parameters
+
+** =sub_lm_context_tokens= (int | None, default =None=)
+
+The sub-LLM's context window in tokens, taken from the model card or provider
+docs.  When supplied it is used directly to compute the char limit
+(=tokens x 4 x safety_factor=) and takes precedence over any value that could
+be inferred from =sub_lm=.
+
+If neither =sub_lm_context_tokens= nor =sub_lm= is provided, the char limit
+falls back to the upstream default of 500 000 (appropriate for models with
+>=128k token context windows).
+
+*** Heuristic table
+
+Rule of thumb: =chars ~ token_limit x 3.5= (conservative) or =x 4.0=
+(aggressive).  Use the conservative figure when the sub-LLM will receive
+heavily structured / multi-lingual text; use aggressive for plain English prose.
+
+| Model family                 | Token limit | Resulting chars (x4, x0.8) |
+|------------------------------|-------------|----------------------------|
+| GPT-5 / Gemini 2.5 Pro       | 1 M+        | default 500k is fine       |
+| Claude Sonnet 3.x / 4.x      | 200 K       | =200_000=                  |
+| Qwen3-Coder-480B-A35B        | ~130 K      | =200_000=                  |
+| GPT-4o / Llama-3.1-70B       | 128 K       | default 500k is fine       |
+| Qwen3-8B / similar small LMs | 32 K        | =100_000=                  |
+
+Note: 500k chars maps to roughly 128k tokens at ~4 chars/token, so the
+default is appropriate for any model with a >=128k context window.
+
+*** Resolution order inside =__init__=
+
+1. =sub_lm_context_tokens= supplied -> =tokens x 4 x safety_factor=, =sub_lm= ignored for this purpose
+2. Only =sub_lm= supplied -> litellm lookup -> same formula (best-effort; raises on bad/missing data)
+3. Neither supplied -> upstream default of 500 000 chars
+
+*** =safety_factor=
+
+Accessible as a constructor kwarg (default =0.8=).  Use =0.6= for multilingual
+or heavily structured content.
+
+*** =chars_for_sub_lm= -- the underlying helper
+
+=__init__= calls this internally to resolve the char limit.  It is also
+exposed as a static method for inspection or pre-computation:
+
+#+BEGIN_SRC python
+# Check what limit will be used before constructing
+print(CustomizableRLM.chars_for_sub_lm(sub_lm_context_tokens=32_768))  # -> 104_857
+#+END_SRC
+
+** =small_model_tips= (bool, default =False=)
+
+When =True=, appends an IMPORTANT batching block to the system prompt.  The
+numbers in the block are computed from =sub_lm_context_chars= so they stay
+self-consistent.
+
+*** Invariant / coupling warning
+
+#+BEGIN_QUOTE
+Only set =small_model_tips=True= when using a genuinely small sub-LLM.
+Without =sub_lm_context_tokens= or a =sub_lm= whose litellm metadata is
+accurate, the injected tips will reference the default 500k figure, producing
+contradictory instructions for a small model (tips say "be careful", capacity
+says "pack 500k in").
+#+END_QUOTE
+
+*** Injected text (small-to-medium models, <= 200k chars)
+
+#+BEGIN_EXAMPLE
+IMPORTANT: Be very careful about using 'llm_query' as it incurs high runtime
+costs.  Always batch as much information as reasonably possible into each call
+(aim for around ~{sub_lm_context_chars:,} characters per call).  For example,
+if you have 1000 lines of information to process, it's much better to split
+into chunks of N and call 'llm_query' on each chunk rather than making 1000
+individual calls.  Minimize the number of 'llm_query' calls by batching
+related information together.
+#+END_EXAMPLE
+
+*** Additional context-length warning (very small models, <= 100k chars)
+
+For =sub_lm_context_chars= <= 100 000 (~32k-token models), a second block is
+prepended:
+
+#+BEGIN_EXAMPLE
+IMPORTANT: You have a total context window of approximately ~{tokens}k tokens.
+Be very careful about context length limits.  The sub-LLMs you can query also
+have this same ~{tokens}k token limit, so you must be conservative with how
+much context you send in each call.  For example, a viable strategy is to feed
+2-3 documents per sub-LLM query.  Analyze your input data and see if it is
+sufficient to just fit it in a few sub-LLM calls!
+#+END_EXAMPLE
+
+* Usage Examples
+
+** Frontier model (default, no change in behaviour)
+
+#+BEGIN_SRC python
+import dspy
+from dspy.predict.customizable_rlm import CustomizableRLM
+
+dspy.configure(lm=dspy.LM("openai/gpt-5"))
+rlm = CustomizableRLM("document, question -> answer")
+#+END_SRC
+
+** Qwen3-Coder-480B-A35B -- explicit token count (authoritative)
+
+#+BEGIN_SRC python
+rlm = CustomizableRLM(
+    "document, question -> answer",
+    sub_lm_context_tokens=130_000,
+    small_model_tips=True,
+    sub_lm=dspy.LM("openai/qwen3-coder-480b-a35b"),
+)
+#+END_SRC
+
+** Qwen3-8B -- explicit token count
+
+#+BEGIN_SRC python
+sub_lm = dspy.LM("openai/qwen3-8b")
+
+rlm = CustomizableRLM(
+    "document, question -> answer",
+    sub_lm_context_tokens=32_768,   # -> ~100_000 chars internally
+    small_model_tips=True,
+    sub_lm=sub_lm,
+)
+#+END_SRC
+
+** Qwen3-8B -- let sub_lm drive the limit (convenient, verify result)
+
+#+BEGIN_SRC python
+sub_lm = dspy.LM("openai/qwen3-8b")
+
+# Char limit derived from litellm metadata; print to verify before using in production
+print(CustomizableRLM.chars_for_sub_lm(lm=sub_lm))
+
+rlm = CustomizableRLM(
+    "document, question -> answer",
+    small_model_tips=True,
+    sub_lm=sub_lm,   # sub_lm_context_tokens omitted -> litellm lookup
+)
+#+END_SRC
+
+** sub_lm_context_tokens overrides sub_lm metadata
+
+#+BEGIN_SRC python
+# Useful when the provider caps the model below its advertised limit
+rlm = CustomizableRLM(
+    "document, question -> answer",
+    sub_lm_context_tokens=16_384,   # provider-capped value takes precedence
+    small_model_tips=True,
+    sub_lm=sub_lm,
+)
+#+END_SRC
+
+** Explicit safety factor for structured / multilingual content
+
+#+BEGIN_SRC python
+rlm = CustomizableRLM(
+    "logs -> error_count: int, critical_errors: list[str]",
+    sub_lm_context_tokens=32_768,
+    safety_factor=0.6,
+    small_model_tips=True,
+    sub_lm=sub_lm,
+    max_iterations=15,
+)
+#+END_SRC
+
+* Open Questions
+
+1. Does =_get_system_prompt= exist as a discrete method, or is the prompt
+   assembled inline?  If inline, the cleanest override may be patching
+   =self.generate_action.signature.instructions= post-=super().__init__()=.
+
+2. Should =safety_factor= be a constructor parameter (as proposed) or a
+   parameter of =chars_for_sub_lm= only?  Exposing it on the constructor is
+   more ergonomic but adds one more kwarg to the already-crowded =**kwargs=
+   surface.
+
+3. Should =chars_for_sub_lm= emit a =logging.warning= when =lm= is supplied
+   and the litellm metadata looks suspect (e.g. returns an unusually round
+   number like exactly 4096 or 8192 that suggests a generic fallback)?  A
+   warning would surface misconfiguration without breaking the pipeline.
+
+* Actionable items tracked in [[file:tasks.org][tasks.org]]
