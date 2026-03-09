@@ -18,11 +18,11 @@ dependencies = [
     "tqdm>=4.67.3",
 ]
 
-[tool.uv.sources]
-rlms = { git = "https://github.com/lambdaofgod/rlm" }
-
 [tool.pytest.ini_options]
 pythonpath = ["codeqa_comparison"]
+
+[tool.uv.sources]
+rlms = { git = "https://github.com/lambdaofgod/rlm.git" }
 
 [dependency-groups]
 dev = [

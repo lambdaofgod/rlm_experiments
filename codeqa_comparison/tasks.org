@@ -156,4 +156,26 @@ Compaction triggers at 85% of the context limit (~54K tokens for 64K). With 64K,
 - [X] =MODEL_CONTEXT_LIMITS[model] = max_tokens= workaround when =base_url= is set -- RLM uses substring matching on model name to find context limits, and custom endpoints (e.g. ="openai/local"=) aren't in its built-in table, so it falls back to 128K and never compacts.
 - [X] =TokenLimitExceededError= caught in the main loop -- skips the example and continues.
 - [X] Switched from =verbose=True= to =verbose=False= + =RLMLogger(log_dir="rlm_logs")= for JSONL trajectory logging instead of noisy console output.
-- [X] Custom system prompt (=rlm_prompts.py=): copied RLM's =RLM_SYSTEM_PROMPT= into =_RLM_SYSTEM_PROMPT_TEMPLATE= with =__CHAR_LIMIT__= placeholders replacing the hardcoded "500K" on lines 12 and 40. =get_rlm_system_prompt(max_tokens)= scales the char limit based on context size: >=128K tokens -> 500K chars, 64-128K -> 250K, <64K -> 125K. Passed to RLM via =custom_system_prompt= kwarg.
+- [X] Custom system prompt (=rlm_prompts.py=): copied RLM's =RLM_SYSTEM_PROMPT= into =_RLM_SYSTEM_PROMPT_TEMPLATE= with =__CHAR_LIMIT__= and =__TOKEN_LIMIT__= placeholders. =get_rlm_system_prompt(max_tokens)= scales both limits based on context size: >=128K tokens -> 512K chars / 128K tokens, 64-128K -> 256K chars / 64K tokens, <64K -> 128K chars / 32K tokens. Passed to RLM via =custom_system_prompt= kwarg.
+
+** DONE Add OpenTelemetry tracing to =run_rlm.py=
+CLOSED: [2026-03-02 Mon]
+
+The =rlm= package ships =RLMInstrumentor= for OpenTelemetry. Wire it up so we can send traces to a collector (Phoenix, Jaeger, etc.).
+
+- [X] Create =rlm_utils.py= with a =setup_otel(endpoint)= function that configures =TracerProvider= + =SimpleSpanProcessor(OTLPSpanExporter(endpoint=endpoint))= and calls =RLMInstrumentor().instrument(tracer_provider=provider)=. Import OTEL packages inside a try/except so missing deps produce a clear error message rather than a crash at import time.
+- [X] Add =--otel_endpoint= flag to =main()= in =run_rlm.py= (default =None=). When set, call =setup_otel(otel_endpoint)= before creating the =RLM= instance.
+- [X] Document the flag in =README.org=.
+
+** DONE Adapt system prompt with batching guidance from RLM paper
+CLOSED: [2026-03-02 Mon]
+
+The RLM paper includes additional prompt guidance for smaller models: warnings about context window limits, =llm_query= batching, and conservative examples. Incorporated these into =_RLM_SYSTEM_PROMPT_TEMPLATE= in =rlm_prompts.py= using dynamic placeholders.
+
+- [X] Added =__TOKEN_LIMIT__= placeholder alongside existing =__CHAR_LIMIT__=. New =_sub_llm_token_limit(max_tokens)= helper returns 128K / 64K / 32K. =get_rlm_system_prompt= replaces both.
+- [X] Two IMPORTANT paragraphs added before the numbered tool list: (1) batch =llm_query= calls, aim for ~=__CHAR_LIMIT__= chars per call; (2) context window is ~=__TOKEN_LIMIT__= tokens, sub-LLMs share the same limit.
+- [X] "Sub LLMs are powerful" paragraph rewritten: tone changed from "don't be afraid" to "be careful not to exceed", "feed 10 documents" -> "feed 2-3 documents". Followed by a second IMPORTANT batching paragraph with token-limit-aware guidance.
+- [X] Example chunk size reduced: =context[:10000]= -> =context[:1000]=.
+- [X] Added =FINAL_VAR(final_answer)= after the aggregation example.
+- [X] FINAL instruction: "NOT in code" -> "NOT in code or repl tags".
+- [X] Char limits bumped 2x: 512K / 256K / 128K (from 256K / 128K / 64K).

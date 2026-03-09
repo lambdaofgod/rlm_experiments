@@ -80,6 +80,7 @@ uv run python run_rlm.py --dataset path/to/dataset.parquet --base_url http://loc
 | =--output=     | auto              | Path to output JSONL (defaults based on dataset variant)       |
 | =--dataset=    | =original=        | =original=, =annotated=, or path to a =.parquet= file         |
 | =--max_tokens= | 40960             | Max total tokens (input + output) for RLM                     |
+| =--otel_endpoint= | None           | OTLP gRPC endpoint for OpenTelemetry tracing (e.g. =http://localhost:4317=) |
 | =--log_dir=    | =rlm_logs=        | Directory for JSONL trajectory logs (None to disable)          |
 | =--verbose=    | False             | Enable RLM verbose console output                             |
 
@@ -97,4 +98,5 @@ RLM is configured with compaction enabled and a custom system prompt that scales
 | =file_match.py=   | Fragment-based file matching and segment merging          |
 | =assemble.py=     | Context reassembly with file boundary markers             |
 | =rlm_prompts.py=  | Custom RLM system prompt with dynamic char limits         |
+| =rlm_utils.py=    | OpenTelemetry tracing setup (=RLMInstrumentor= + OTLP exporter) |
 | =dspy_rlm.py=     | Legacy DSPy RLM wrapper (unused, kept for reference)      |

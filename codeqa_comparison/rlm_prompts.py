@@ -9,13 +9,33 @@ def _sub_llm_char_limit(max_tokens: int) -> str:
     if max_tokens >= 128_000:
         return "500K"
     if max_tokens >= 64_000:
-        return "250K"
-    return "125K"
+        return "100K"
+    return "24K"
+
+
+def _sub_llm_char_guidance(max_tokens: int) -> str:
+    """Return a human-readable batching guidance size for sub-LLM prompts."""
+    if max_tokens >= 128_000:
+        return "200K"
+    if max_tokens >= 64_000:
+        return "50K"
+    return "10K"
+
+
+def _sub_llm_token_limit(max_tokens: int) -> str:
+    """Return a human-readable token limit for sub-LLM prompts based on context size."""
+    if max_tokens >= 128_000:
+        return "128K"
+    if max_tokens >= 64_000:
+        return "64K"
+    return "32K"
 
 
 # System prompt for the REPL environment with explicit final answer checking
 _RLM_SYSTEM_PROMPT_TEMPLATE = textwrap.dedent(
     """You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
+
+IMPORTANT: You have a total context window of approximately ~__TOKEN_LIMIT__ tokens. Be very careful about context length limits. The sub-LLMs you can query also have this same ~__TOKEN_LIMIT__ token limit, so you must be conservative with how much context you send in each call.
 
 The REPL environment is initialized with:
 1. A `context` variable that contains extremely important information about your query. You should check the content of the `context` variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
@@ -47,11 +67,13 @@ final_answer = llm_query(f"An electron entered a B field and underwent helical m
 You will only be able to see truncated outputs from the REPL environment, so you should use the query LLM function on variables you want to analyze. You will find this function especially useful when you have to analyze the semantics of the context. Use these variables as buffers to build up your final answer.
 Make sure to explicitly look through the entire context in REPL before answering your query. Break the context and the problem into digestible pieces: e.g. figure out a chunking strategy, break up the context into smart chunks, query an LLM per chunk and save answers to a buffer, then query an LLM over the buffers to produce your final answer.
 
-You can use the REPL environment to help you understand your context, especially if it is huge. Remember that your sub LLMs are powerful -- they can fit around __CHAR_LIMIT__ characters in their context window, so don't be afraid to put a lot of context into them. For example, a viable strategy is to feed 10 documents per sub-LLM query. Analyze your input data and see if it is sufficient to just fit it in a few sub-LLM calls!
+You can use the REPL environment to help you understand your context, especially if it is huge. Remember that your sub LLMs have a ~__TOKEN_LIMIT__ token limit (approximately ~__CHAR_LIMIT__ characters) -- be careful not to exceed this. For example, a viable strategy is to feed 2-3 documents per sub-LLM query. Analyze your input data and see if it is sufficient to just fit it in a few sub-LLM calls!
+
+IMPORTANT: Be very careful about using 'llm_query' as it incurs high runtime costs. Always batch as much information as reasonably possible into each call while staying within the ~__TOKEN_LIMIT__ token limit (aim for around ~__CHAR_GUIDANCE__ characters per call to be safe). Minimize the number of 'llm_query' calls by batching related information together, but always respect the ~__TOKEN_LIMIT__ token limit.
 
 When you want to execute Python code in the REPL environment, wrap it in triple backticks with 'repl' language identifier. For example, say we want our recursive model to search for the magic number in the context (assuming the context is a string), and the context is very long, so we want to chunk it:
 ```repl
-chunk = context[:10000]
+chunk = context[:1000]
 answer = llm_query(f"What is the magic number in the context? Here is the chunk: {{chunk}}")
 print(answer)
 ```
@@ -68,7 +90,7 @@ for i, section in enumerate(context):
         print(f"After section {{i}} of {{len(context)}}, you have tracked: {{buffer}}")
 ```
 
-As another example, when the context isn't that long (e.g. >100M characters), a simple but viable strategy is, based on the context chunk lengths, to combine them and recursively query an LLM over chunks. For example, if the context is a List[str], we ask the same query over each chunk using `llm_query_batched` for concurrent processing:
+As another example, when the context isn't that long (e.g. <1M characters), a simple but viable strategy is, based on the context chunk lengths, to combine them and recursively query an LLM over chunks. For example, if the context is a List[str], we ask the same query over each chunk using `llm_query_batched` for concurrent processing:
 ```repl
 query = "A man became famous for his book "The Great Gatsby". How many jobs did he have?"
 # Suppose our context is ~1M chars, and we want each sub-LLM query to be ~0.1M chars so we split it into 10 chunks
@@ -87,6 +109,7 @@ answers = llm_query_batched(prompts)
 for i, answer in enumerate(answers):
     print(f"I got the answer from chunk {{i}}: {{answer}}")
 final_answer = llm_query(f"Aggregating all the answers per chunk, answer the original query about total number of jobs: {{query}}\\n\\nAnswers:\\n" + "\\n".join(answers))
+FINAL_VAR(final_answer)
 ```
 
 For subtasks that require deeper reasoning (e.g. solving a complex sub-problem), use `rlm_query` instead. The child gets its own REPL to iterate; you can then use the result in parent logic:
@@ -107,8 +130,9 @@ As a final example, implement the solution as a **program**: try one approach vi
 r = rlm_query("Prove sqrt 2 is irrational. Give a 1-2 sentence proof, or reply only: USE_LEMMA or USE_CONTRADICTION.")
 if "USE_LEMMA" in r.upper():
     final_answer = rlm_query("Prove 'n^2 even => n even' then use it to show sqrt 2 irrational. Two sentences.")
+```
 
-IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code. Do not use these tags unless you have completed your task. You have two options:
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code or repl tags. Do not use these tags unless you have completed your task. You have two options:
 1. Use FINAL(your final answer here) to provide the answer directly
 2. Use FINAL_VAR(variable_name) to return a variable you have created in the REPL environment as your final output
 
@@ -126,12 +150,22 @@ Think step by step carefully, plan, and execute this plan immediately in your re
 )
 
 # Default for 128K+ models (original behavior)
-RLM_SYSTEM_PROMPT = _RLM_SYSTEM_PROMPT_TEMPLATE.replace("__CHAR_LIMIT__", "500K")
+RLM_SYSTEM_PROMPT = (
+    _RLM_SYSTEM_PROMPT_TEMPLATE
+    .replace("__CHAR_LIMIT__", "500K")
+    .replace("__TOKEN_LIMIT__", "128K")
+    .replace("__CHAR_GUIDANCE__", "200K")
+)
 
 
 def get_rlm_system_prompt(max_tokens: int) -> str:
-    """Return the RLM system prompt with sub-LLM char limits scaled to context size."""
-    return _RLM_SYSTEM_PROMPT_TEMPLATE.replace("__CHAR_LIMIT__", _sub_llm_char_limit(max_tokens))
+    """Return the RLM system prompt with sub-LLM limits scaled to context size."""
+    return (
+        _RLM_SYSTEM_PROMPT_TEMPLATE
+        .replace("__CHAR_LIMIT__", _sub_llm_char_limit(max_tokens))
+        .replace("__TOKEN_LIMIT__", _sub_llm_token_limit(max_tokens))
+        .replace("__CHAR_GUIDANCE__", _sub_llm_char_guidance(max_tokens))
+    )
 
 
 def build_rlm_system_prompt(

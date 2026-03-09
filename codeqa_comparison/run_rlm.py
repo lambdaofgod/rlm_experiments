@@ -90,6 +90,8 @@ def main(
     dataset: str = "original",
     max_tokens: int = 40960,
     environment: str = "pyodide",
+    otel_endpoint: Optional[str] = None,
+    otel_project_name: Optional[str] = None,
     log_dir: Optional[str] = "rlm_logs",
     verbose: bool = False,
 ):
@@ -102,9 +104,23 @@ def main(
         dataset: "original" or "annotated".
         max_tokens: Maximum total tokens (input + output) for RLM.
         environment: RLM REPL environment ("pyodide" or "local").
+        otel_endpoint: OpenTelemetry OTLP gRPC endpoint (e.g. "http://localhost:4317"). None to disable.
+        otel_project_name: OTEL service.name. Defaults to "rlm_codeqa_{original,annotated,other}" based on dataset.
         log_dir: Directory for RLM JSONL logs. Set to None to disable.
         verbose: Enable RLM verbose console output.
     """
+    if otel_endpoint is not None:
+        from rlm_utils import setup_otel
+
+        if otel_project_name is None:
+            if dataset == "original":
+                otel_project_name = "rlm_codeqa_original"
+            elif dataset == "annotated":
+                otel_project_name = "rlm_codeqa_annotated"
+            else:
+                otel_project_name = "rlm_codeqa_other"
+        setup_otel(otel_endpoint, project_name=otel_project_name)
+
     if output is None:
         output = (
             "results_rlm_annotated.jsonl"
@@ -147,29 +163,31 @@ def main(
 
     correct = 0
     total = 0
+    skipped = 0
 
     with out_path.open("w") as f:
         pbar = tqdm(ds, total=n_examples, desc="CodeQA RLM")
         for example in pbar:
+            total += 1
             try:
                 predicted, raw_answer = run_single(rlm, example)
             except (TokenLimitExceededError, Exception) as e:
                 if isinstance(e, TokenLimitExceededError) or "context" in str(e).lower():
+                    skipped += 1
                     tqdm.write(f"  SKIPPED {example['_id']}: {e}")
                     continue
                 raise
             record = make_record(example, predicted, raw_answer, model)
 
             correct += record["correct"]
-            total += 1
 
             pbar.set_postfix(
-                acc=f"{correct}/{total}", last=f"{record['predicted']}/{record['gold']}"
+                acc=f"{correct}/{total}", skip=skipped, last=f"{record['predicted']}/{record['gold']}"
             )
             f.write(json.dumps(record) + "\n")
             f.flush()
 
-    print(f"\nFinal accuracy: {correct}/{total} ({correct/total:.1%})")
+    print(f"\nFinal accuracy: {correct}/{total} ({correct/total:.1%}), skipped: {skipped}")
 
 
 if __name__ == "__main__":
