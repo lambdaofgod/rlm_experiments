@@ -1,0 +1,446 @@
+"""Evaluate predictions against LongBench-Pro gold answers.
+
+Uses the correct metric per secondary_task as defined by LongBench-Pro.
+"""
+
+import json
+import math
+import re
+from collections import defaultdict
+
+import fire
+import pandas as pd
+import yaml
+
+
+# ---------------------------------------------------------------------------
+# Answer normalization
+# ---------------------------------------------------------------------------
+
+def normalize_element(s):
+    """Lowercase, strip whitespace from a single answer element."""
+    return str(s).strip().lower()
+
+
+def parse_answer_list(raw):
+    """Parse a prediction or gold answer into a list of normalized strings.
+
+    Handles:
+    - JSON-encoded lists: '["a", "b"]'
+    - Python list repr: "['a', 'b']"
+    - Newline-separated values
+    - Single value: "42"
+    """
+    if isinstance(raw, list):
+        return [normalize_element(x) for x in raw]
+
+    s = str(raw).strip()
+
+    # Try JSON first
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            return [normalize_element(x) for x in parsed]
+        return [normalize_element(parsed)]
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Try Python list repr (e.g. "['a', 'b']")
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1]
+        parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
+        if parts:
+            return [normalize_element(x) for x in parts]
+
+    # Newline-separated (LongBench-Pro default format)
+    if "\n" in s:
+        parts = [p.strip() for p in s.split("\n") if p.strip()]
+        if parts:
+            return [normalize_element(x) for x in parts]
+
+    # Single value
+    return [normalize_element(s)]
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+def accuracy(gold, pred):
+    """Exact match on first element only."""
+    if not gold or not pred:
+        return 0.0
+    return 1.0 if gold[0] == pred[0] else 0.0
+
+
+def sub_em(gold, pred):
+    """Subset exact match: fraction of gold elements found in prediction."""
+    if not gold:
+        return 1.0
+    pred_set = set(pred)
+    matched = sum(1 for g in gold if g in pred_set)
+    return matched / len(gold)
+
+
+def f1_score(gold, pred):
+    """Set-level F1 over answer elements."""
+    if not gold and not pred:
+        return 1.0
+    if not gold or not pred:
+        return 0.0
+    gold_set = set(gold)
+    pred_set = set(pred)
+    intersection = gold_set & pred_set
+    if not intersection:
+        return 0.0
+    precision = len(intersection) / len(pred_set)
+    recall = len(intersection) / len(gold_set)
+    return 2 * precision * recall / (precision + recall)
+
+
+def pairwise_accuracy(gold, pred):
+    """Fraction of gold item pairs that appear in correct relative order in pred."""
+    if len(gold) < 2:
+        return 1.0
+
+    pred_pos = {}
+    for i, p in enumerate(pred):
+        if p not in pred_pos:
+            pred_pos[p] = i
+
+    total_pairs = 0
+    correct_pairs = 0
+    for i in range(len(gold)):
+        for j in range(i + 1, len(gold)):
+            if gold[i] in pred_pos and gold[j] in pred_pos:
+                total_pairs += 1
+                if pred_pos[gold[i]] < pred_pos[gold[j]]:
+                    correct_pairs += 1
+
+    if total_pairs == 0:
+        return 0.0
+    return correct_pairs / total_pairs
+
+
+def _dcg(relevances):
+    """Discounted cumulative gain."""
+    return sum(rel / math.log2(i + 2) for i, rel in enumerate(relevances))
+
+
+def ndcg(gold, pred):
+    """NDCG@k where k = len(gold).
+
+    Gold items are assigned decreasing relevance by position.
+    """
+    k = len(gold)
+    if k == 0:
+        return 1.0
+
+    gold_rel = {}
+    for i, g in enumerate(gold):
+        if g not in gold_rel:
+            gold_rel[g] = k - i
+
+    pred_rels = []
+    for p in pred[:k]:
+        pred_rels.append(gold_rel.get(p, 0))
+    pred_rels.extend([0] * (k - len(pred_rels)))
+
+    dcg_val = _dcg(pred_rels)
+    ideal_rels = sorted(gold_rel.values(), reverse=True)[:k]
+    ideal_rels.extend([0] * (k - len(ideal_rels)))
+    idcg_val = _dcg(ideal_rels)
+
+    if idcg_val == 0:
+        return 0.0
+    return dcg_val / idcg_val
+
+
+def summary_score(_gold, _pred):
+    """Stub for summary metric (requires embedding model). Returns NaN."""
+    return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Metric dispatch
+# ---------------------------------------------------------------------------
+
+METRIC_MAP = {
+    "T1.1": ndcg,
+    "T1.2": ndcg,
+    "T2.1": pairwise_accuracy,
+    "T2.2": pairwise_accuracy,
+    "T3.1": accuracy,
+    "T3.2": accuracy,
+    "T4.1": summary_score,
+    "T4.2": summary_score,
+    "T5.1": f1_score,
+    "T5.2": f1_score,
+    "T6.1": sub_em,
+    "T6.2": f1_score,
+    "T6.3": pairwise_accuracy,
+    "T7.1": f1_score,
+    "T7.2": f1_score,
+    "T7.3": f1_score,
+    "T8.1": sub_em,
+    "T8.2": sub_em,
+    "T8.3": sub_em,
+    "T9.1": f1_score,
+    "T9.2": f1_score,
+    "T10.1": sub_em,
+    "T10.2": sub_em,
+    "T11.1": accuracy,
+    "T11.2": accuracy,
+}
+
+
+def get_task_code(secondary_task):
+    """Extract task code like 'T1.1' from 'T1.1 Global Cohesive Retrieval'."""
+    match = re.match(r"(T\d+\.\d+)", secondary_task)
+    return match.group(1) if match else secondary_task
+
+
+def get_metric(secondary_task):
+    code = get_task_code(secondary_task)
+    return METRIC_MAP.get(code)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate(
+    predictions_path,
+    dataset_path="longbench_pro_en.parquet",
+    pred_col="pred_answer",
+    id_col="id",
+    show_errors=False,
+):
+    """Evaluate predictions against gold answers.
+
+    Expects a CSV/parquet with at least `id` and `pred_answer` columns.
+    Joins against the dataset on `id` to get gold answers and secondary_task.
+    """
+    df_gold = pd.read_parquet(dataset_path)
+
+    if predictions_path.endswith(".parquet"):
+        df_pred = pd.read_parquet(predictions_path)
+    else:
+        df_pred = pd.read_csv(predictions_path)
+
+    # Normalize column names to match _score_predictions expectations
+    df_pred = df_pred.rename(columns={id_col: "id", pred_col: "pred_answer"})
+    _score_predictions(df_gold, df_pred, show_errors=show_errors)
+
+
+# ---------------------------------------------------------------------------
+# Phoenix trace-based evaluation
+# ---------------------------------------------------------------------------
+
+def _extract_answer_from_prediction_repr(output_json_str):
+    """Extract answer string from RLM span output.
+
+    Output is a JSON list where element 0 is a Prediction repr like:
+      Prediction(
+          answer='...VALUE...',
+          trajectory=[...])
+
+    The answer field can be single-quoted or double-quoted.
+    """
+    parsed = json.loads(output_json_str)
+    repr_str = parsed[0]
+
+    # Try both quoting styles: answer='...' and answer="..."
+    for quote in ("'", '"'):
+        sep = f"{quote},\n    trajectory="
+        prefix = f"Prediction(\n    answer={quote}"
+        if prefix in repr_str and sep in repr_str:
+            answer_part = repr_str.split(sep)[0]
+            answer_part = answer_part.replace(prefix, "", 1)
+            answer_part = answer_part.replace("\\n", "\n")
+            # Strip [Answer] prefix leak from LongBench-Pro format
+            answer_part = re.sub(r"^\[Answer\]\s*", "", answer_part)
+            return answer_part
+
+    raise ValueError(f"Cannot parse Prediction repr: {repr_str[:200]}")
+
+
+def fetch_predictions(phoenix_endpoint, project_name, dataset_path):
+    """Fetch RLM predictions from Phoenix traces and match to dataset rows.
+
+    HACK: Matching is done by comparing span query text to dataset
+    question_nonthinking. Tries direct match first, then applies
+    transform_question for pre-transform spans. This is fragile and needs
+    a systematic fix (e.g. passing row id through to spans).
+    """
+    from phoenix.client import Client
+
+    from data_utils import transform_question
+
+    # Strip /v1/traces suffix if present -- Client wants base URL
+    base_url = re.sub(r"/v1/traces/?$", "", phoenix_endpoint)
+    client = Client(base_url=base_url)
+
+    spans_df = client.spans.get_spans_dataframe(
+        project_name=project_name,
+        root_spans_only=True,
+    )
+
+    # Filter to successful RLM forward spans only
+    rlm_spans = spans_df[spans_df["name"] == "RLM.forward"]
+    ok_spans = rlm_spans[rlm_spans["status_code"] == "OK"].copy()
+    print(f"Fetched {len(spans_df)} root spans, {len(rlm_spans)} RLM.forward, {len(ok_spans)} OK")
+
+    # Load dataset for matching
+    dataset = pd.read_parquet(dataset_path)
+
+    # Build lookup: question_nonthinking -> row
+    question_to_row = {}
+    for _, row in dataset.iterrows():
+        question_to_row[row["question_nonthinking"]] = row
+
+    # Also build transformed-question lookup for pre-transform spans
+    transformed_to_row = {}
+    for _, row in dataset.iterrows():
+        transformed = transform_question(row["question_nonthinking"])
+        transformed_to_row[transformed] = row
+
+    results = []
+    unmatched = 0
+    for _, span in ok_spans.iterrows():
+        input_data = json.loads(span["attributes.input.value"])
+        query = input_data["input_args"]["query"]
+
+        # Try direct match first (post-transform spans)
+        matched_row = question_to_row.get(query)
+
+        # Fallback: apply transform_question (pre-transform spans)
+        if matched_row is None:
+            transformed_query = transform_question(query)
+            matched_row = question_to_row.get(transformed_query)
+
+        # Also try matching against the transformed lookup
+        if matched_row is None:
+            matched_row = transformed_to_row.get(query)
+
+        if matched_row is None:
+            unmatched += 1
+            continue
+
+        try:
+            answer = _extract_answer_from_prediction_repr(
+                span["attributes.output.value"]
+            )
+        except (json.JSONDecodeError, IndexError, KeyError):
+            unmatched += 1
+            continue
+
+        results.append({
+            "id": matched_row["id"],
+            "question_nonthinking": matched_row["question_nonthinking"],
+            "pred_answer": answer,
+            "start_time": span["start_time"],
+        })
+
+    if unmatched:
+        print(f"Warning: {unmatched} spans could not be matched to dataset rows")
+
+    if not results:
+        print("No predictions matched!")
+        return pd.DataFrame(columns=["id", "pred_answer"])
+
+    df = pd.DataFrame(results)
+
+    # Deduplicate: keep latest span per dataset row
+    df = df.sort_values("start_time").groupby("id").last().reset_index()
+    print(f"Matched {len(df)} unique predictions")
+
+    return df[["id", "pred_answer"]]
+
+
+def _score_predictions(df_gold, df_pred, show_errors=False):
+    """Score predictions against gold answers. Shared by evaluate and phoenix."""
+    merged = df_gold.merge(df_pred[["id", "pred_answer"]], on="id", how="inner")
+    print(f"Matched {len(merged)}/{len(df_gold)} examples")
+
+    task_scores = defaultdict(list)
+    metric_scores = defaultdict(list)
+    all_scores = []
+    skipped = 0
+
+    for _, row in merged.iterrows():
+        task_code = get_task_code(row["secondary_task"])
+        metric_fn = get_metric(row["secondary_task"])
+
+        if metric_fn is None:
+            skipped += 1
+            continue
+
+        gold = parse_answer_list(row["answer"])
+        pred = parse_answer_list(row["pred_answer"])
+        score = metric_fn(gold, pred)
+
+        if math.isnan(score):
+            skipped += 1
+            continue
+
+        task_scores[task_code].append(score)
+        metric_name = metric_fn.__name__
+        metric_scores[metric_name].append(score)
+        all_scores.append(score)
+
+        if show_errors and score < 1.0:
+            print(f"  [{row['id'][:12]}] {task_code} {metric_name}={score:.3f}")
+            print(f"       gold: {gold}")
+            print(f"       pred: {pred}")
+            print()
+
+    print("=" * 60)
+    print("Per-task scores:")
+    print("-" * 60)
+    for code in sorted(task_scores.keys()):
+        scores = task_scores[code]
+        avg = sum(scores) / len(scores) if scores else 0
+        metric_name = get_metric(code).__name__
+        print(f"  {code:8s} ({metric_name:20s}): {avg:.3f}  (n={len(scores)})")
+
+    print()
+    print("Per-metric scores:")
+    print("-" * 60)
+    for name in sorted(metric_scores.keys()):
+        scores = metric_scores[name]
+        avg = sum(scores) / len(scores) if scores else 0
+        print(f"  {name:20s}: {avg:.3f}  (n={len(scores)})")
+
+    print()
+    if all_scores:
+        overall = sum(all_scores) / len(all_scores)
+        print(f"Overall: {overall:.3f}  (n={len(all_scores)}, skipped={skipped})")
+    else:
+        print(f"No scores computed (skipped={skipped})")
+    print("=" * 60)
+
+
+def evaluate_phoenix(config_path, show_errors=False):
+    """Evaluate RLM predictions by fetching traces from Phoenix.
+
+    Reads traces_endpoint, traces_project, and dataset.path from config YAML.
+    Fetches all available spans from the project.
+    """
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    phoenix_endpoint = config["traces_endpoint"]
+    project_name = config["traces_project"]
+    dataset_path = config["dataset"]["path"]
+
+    df_pred = fetch_predictions(phoenix_endpoint, project_name, dataset_path)
+    if df_pred.empty:
+        return
+
+    df_gold = pd.read_parquet(dataset_path)
+    _score_predictions(df_gold, df_pred, show_errors=show_errors)
+
+
+if __name__ == "__main__":
+    fire.Fire({"evaluate": evaluate, "phoenix": evaluate_phoenix})

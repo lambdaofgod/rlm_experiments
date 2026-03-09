@@ -84,27 +84,78 @@ Right now there are problems with "metric" - it almost always says the answer is
    - [X] Unit tests for ~chars_for_sub_lm~ (token-only, LM-only, both, neither)
    - [ ] Integration smoke test with ~MockInterpreter~ at 100k setting
 
-** TODO Parse RLM output and evaluate with LongBench-Pro metrics
+** TODO Evaluate RLM predictions via Phoenix traces
 
-   RLM output (SFT JSONL trajectory) contains SUBMIT calls with answers
-   that may need parsing/normalization.  LongBench-Pro uses 6 different
-   metrics depending on ~secondary_task~.  We need a script that:
+   Instead of parsing SFT JSONL output (which contains interleaved RLM
+   action steps with unresolvable variable references in SUBMIT calls),
+   fetch completed traces from Phoenix and extract final answers directly.
 
-   1. Parses RLM answers from the collected SFT data (extract the value
-      passed to ~SUBMIT(answer=...)~ -- handle both literal values and
-      variable references like ~SUBMIT(answer=answer)~)
-   2. Joins predictions back to the dataset to get gold answers and
-      ~secondary_task~
-   3. Evaluates using the correct metric per question
+   ~evaluate.py phoenix --config_path=config.yaml --n_traces=10~
+
+   Uses ~traces_endpoint~, ~traces_project~, and ~dataset.path~ from the
+   config YAML.
+
+*** Phoenix span schema (verified)
+
+    Tested against local Phoenix at ~http://localhost:6006~.
+
+    - ~from phoenix.client import Client~ / ~Client(base_url=...)~
+      (~arize-phoenix-client~ package, already added)
+    - ~client.spans.get_spans_dataframe(project_name=..., root_spans_only=True, limit=N)~
+    - Root spans have ~name='RLM.forward'~, ~span_kind='CHAIN'~
+    - Columns: ~attributes.input.value~, ~attributes.output.value~, ~status_code~, ~start_time~, etc.
+    - ~status_code~: ~'OK'~ for completed, ~'ERROR'~ for failed (filter these out)
+    - Input is JSON: ~{"input_args": {"context": "...", "query": "..."}}~
+      - Does NOT contain dataset row ~id~ -- must match by query text
+    - Output is JSON list: ~["Prediction(\n    answer='...VALUE...',\n    trajectory=[...])", [...]]~
+      - ~parsed[0]~ is the Prediction repr string
+      - Answer extraction: split on ~"',\n    trajectory="~, strip ~"Prediction(\n    answer='"~ prefix
+      - Answers may have ~[Answer]\n~ prefix from LongBench-Pro format leak -- strip it
+    - Matching to dataset: span's ~input_args.query~ corresponds to
+      ~question_nonthinking~ (via prompt template).  Try direct match first;
+      if no match, apply ~transform_question~ and retry (handles pre-transform
+      spans).  *HACK* -- this is fragile and depends on transform_question
+      being idempotent-ish.  Needs a systematic fix: either pass the row ~id~
+      through to spans (e.g. as span attribute or in input), or store a
+      lookup key in the dataset.
+    - Duplicates: multiple spans can match the same dataset row (retries);
+      group by matched ~question_nonthinking~, take the latest span per group
+
+*** Approach
+
+    1. Connect to Phoenix: ~Client(base_url=traces_endpoint)~
+    2. Fetch root spans: ~client.spans.get_spans_dataframe(project_name=..., root_spans_only=True, limit=N)~
+    3. Filter to ~status_code == 'OK'~ only
+    4. For each span, extract answer from ~attributes.output.value~ (parse JSON list, split Prediction repr)
+    5. Match to dataset row by comparing query text to ~question_nonthinking~ column
+    6. Deduplicate: keep most recent span per dataset row (by ~start_time~)
+    7. Evaluate using existing LongBench-Pro metric functions
+
+*** Dependencies
+
+    - [X] ~uv add arize-phoenix-client~ (already installed v1.31.0)
+
+*** Subtasks
+
+    - [ ] Add ~fetch_predictions(phoenix_endpoint, project_name, n_traces, dataset_path)~
+      - Connect, fetch root spans, filter OK, extract answers, match to rows
+      - Return DataFrame with ~id~ and ~pred_answer~ columns
+    - [ ] Add ~evaluate_phoenix(config_path, n_traces, show_errors)~ CLI command
+      - Read ~traces_endpoint~, ~traces_project~, ~dataset.path~ from config
+      - Call ~fetch_predictions~, then score with ~_score_predictions~
+    - [X] Investigate Phoenix span schema (see above)
+    - [ ] Test on sample project (~dspy-sft-longbench-sample-opus~: 13 OK / 6 ERROR out of 19)
 
 *** Metric mapping (~secondary_task~ -> metric)
+
+    Existing metrics in ~evaluate.py~ (already implemented):
 
     | secondary_task | Metric            | Description                                          |
     |----------------+-------------------+------------------------------------------------------|
     | T1.1, T1.2     | NDCG              | Ranking quality; gold positions = relevance scores    |
     | T2.1, T2.2     | Pairwise_Accuracy | Fraction of item pairs in correct relative order      |
     | T3.1, T3.2     | Accuracy          | Exact match on first element only                    |
-    | T4.1, T4.2     | Summary           | 0.5*SemSim + 0.5*ROUGE-L (needs embedding model)    |
+    | T4.1, T4.2     | Summary           | 0.5*SemSim + 0.5*ROUGE-L (stub, needs embedding)    |
     | T5.1, T5.2     | F1_Score          | Set-level F1 over answer elements                    |
     | T6.1           | SubEM             | Fraction of gold elements present in prediction      |
     | T6.2           | F1_Score          | Set-level F1                                         |
@@ -114,26 +165,6 @@ Right now there are problems with "metric" - it almost always says the answer is
     | T9.1, T9.2     | F1_Score          | Set-level F1                                         |
     | T10.1, T10.2   | SubEM             | Subset exact match                                   |
     | T11.1, T11.2   | Accuracy          | Exact match on first element                         |
-
-*** Metrics to implement
-
-    - [ ] ~accuracy(gold, pred)~ -- compare first elements, case-insensitive
-    - [ ] ~sub_em(gold, pred)~ -- fraction of gold list found in pred list
-    - [ ] ~f1_score(gold, pred)~ -- set intersection F1
-    - [ ] ~pairwise_accuracy(gold, pred)~ -- pair ordering fraction
-    - [ ] ~ndcg(gold, pred)~ -- use ~pytrec_eval~ or manual NDCG@k
-    - [ ] ~summary_score(gold, pred)~ -- SKIP or stub (requires Qwen3-Embedding-8B for SemSim)
-
-*** Subtasks
-
-    - [X] Create ~evaluate.py~ with metric functions and CLI
-    - [X] Answer parser: extract answer from DSPy ChatAdapter field format,
-          normalize (lowercase, strip, parse JSON/list/csv)
-    - [X] Map ~secondary_task~ to metric function via dict
-    - [X] Join SFT output with dataset by row index
-    - [X] Aggregate scores: per-task, per-metric, overall
-    - [X] NDCG implemented manually (no pytrec-eval dependency)
-    - [ ] Run on actual SFT output and verify results
 
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
