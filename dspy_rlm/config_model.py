@@ -55,6 +55,41 @@ class Config(BaseModel):
     collection: CollectionConfig = CollectionConfig()
 
 
+# ---------------------------------------------------------------------------
+# Eval output models
+# ---------------------------------------------------------------------------
+
+
+class GroupStats(BaseModel):
+    avg: float
+    n: int
+
+
+class ScoredExample(BaseModel):
+    id: str
+    task: str
+    metric: str
+    score: float
+    gold_answer: list[str]
+    pred_answer: list[str]
+    token_length: Optional[str] = None
+    difficulty: Optional[str] = None
+
+
+class EvalSummary(BaseModel):
+    per_task: dict[str, GroupStats]
+    per_metric: dict[str, GroupStats]
+    per_length: Optional[dict[str, GroupStats]] = None
+    per_difficulty: Optional[dict[str, GroupStats]] = None
+    overall: GroupStats
+    skipped: int
+
+
+class EvalReport(BaseModel):
+    summary: EvalSummary
+    examples: list[ScoredExample]
+
+
 def load_config(config_path: str) -> Config:
     with open(config_path) as f:
         raw = yaml.safe_load(f)

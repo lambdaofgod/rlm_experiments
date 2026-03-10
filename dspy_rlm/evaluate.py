@@ -11,7 +11,7 @@ from collections import defaultdict
 import fire
 import pandas as pd
 
-from config_model import load_config
+from config_model import EvalReport, EvalSummary, GroupStats, ScoredExample, load_config
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +216,7 @@ def evaluate(
     pred_col="pred_answer",
     id_col="id",
     show_errors=False,
+    output_metrics=None,
 ):
     """Evaluate predictions against gold answers.
 
@@ -231,7 +232,7 @@ def evaluate(
 
     # Normalize column names to match _score_predictions expectations
     df_pred = df_pred.rename(columns={id_col: "id", pred_col: "pred_answer"})
-    _score_predictions(df_gold, df_pred, show_errors=show_errors)
+    _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -366,102 +367,133 @@ def fetch_predictions(phoenix_endpoint, project_name, dataset_path, limit=10000)
     return df[["id", "pred_answer"]]
 
 
-def _score_predictions(df_gold, df_pred, show_errors=False):
-    """Score predictions against gold answers. Shared by evaluate and phoenix."""
-    merged = df_gold.merge(df_pred[["id", "pred_answer"]], on="id", how="inner")
-    print(f"Matched {len(merged)}/{len(df_gold)} examples")
+def _score_row(row):
+    """Score a single merged DataFrame row. Returns ScoredExample or None."""
+    metric_fn = get_metric(row["secondary_task"])
+    if metric_fn is None:
+        return None
 
+    gold = parse_answer_list(row["answer"])
+    pred = parse_answer_list(row["pred_answer"])
+    score = metric_fn(gold, pred)
+    if math.isnan(score):
+        return None
+
+    return ScoredExample(
+        id=row["id"],
+        task=get_task_code(row["secondary_task"]),
+        metric=metric_fn.__name__,
+        score=score,
+        gold_answer=gold,
+        pred_answer=pred,
+        token_length=row.get("token_length"),
+        difficulty=row.get("difficulty"),
+    )
+
+
+def _aggregate(results, skipped):
+    """Build EvalSummary from a list of ScoredExamples."""
     task_scores = defaultdict(list)
     metric_scores = defaultdict(list)
     length_scores = defaultdict(list)
     difficulty_scores = defaultdict(list)
-    all_scores = []
-    skipped = 0
 
-    has_length = "token_length" in merged.columns
-    has_difficulty = "difficulty" in merged.columns
+    for r in results:
+        task_scores[r.task].append(r.score)
+        metric_scores[r.metric].append(r.score)
+        if r.token_length is not None:
+            length_scores[r.token_length].append(r.score)
+        if r.difficulty is not None:
+            difficulty_scores[r.difficulty].append(r.score)
 
-    for _, row in merged.iterrows():
-        task_code = get_task_code(row["secondary_task"])
-        metric_fn = get_metric(row["secondary_task"])
+    def _gs(scores):
+        return GroupStats(avg=sum(scores) / len(scores) if scores else 0.0, n=len(scores))
 
-        if metric_fn is None:
-            skipped += 1
-            continue
+    all_scores = [r.score for r in results]
+    return EvalSummary(
+        per_task={k: _gs(v) for k, v in sorted(task_scores.items())},
+        per_metric={k: _gs(v) for k, v in sorted(metric_scores.items())},
+        per_length={k: _gs(v) for k, v in length_scores.items()} if length_scores else None,
+        per_difficulty={k: _gs(v) for k, v in difficulty_scores.items()} if difficulty_scores else None,
+        overall=_gs(all_scores),
+        skipped=skipped,
+    )
 
-        gold = parse_answer_list(row["answer"])
-        pred = parse_answer_list(row["pred_answer"])
-        score = metric_fn(gold, pred)
 
-        if math.isnan(score):
-            skipped += 1
-            continue
-
-        task_scores[task_code].append(score)
-        metric_name = metric_fn.__name__
-        metric_scores[metric_name].append(score)
-        all_scores.append(score)
-
-        if has_length:
-            length_scores[row["token_length"]].append(score)
-        if has_difficulty:
-            difficulty_scores[row["difficulty"]].append(score)
-
-        if show_errors and score < 1.0:
-            print(f"  [{row['id'][:12]}] {task_code} {metric_name}={score:.3f}")
-            print(f"       gold: {gold}")
-            print(f"       pred: {pred}")
-            print()
+def _print_summary(summary, results, show_errors):
+    """Print evaluation summary to stdout."""
+    if show_errors:
+        for r in results:
+            if r.score < 1.0:
+                print(f"  [{r.id[:12]}] {r.task} {r.metric}={r.score:.3f}")
+                print(f"       gold: {r.gold_answer}")
+                print(f"       pred: {r.pred_answer}")
+                print()
 
     print("=" * 60)
     print("Per-task scores:")
     print("-" * 60)
-    for code in sorted(task_scores.keys()):
-        scores = task_scores[code]
-        avg = sum(scores) / len(scores) if scores else 0
+    for code, stats in summary.per_task.items():
         metric_name = get_metric(code).__name__
-        print(f"  {code:8s} ({metric_name:20s}): {avg:.3f}  (n={len(scores)})")
+        print(f"  {code:8s} ({metric_name:20s}): {stats.avg:.3f}  (n={stats.n})")
 
     print()
     print("Per-metric scores:")
     print("-" * 60)
-    for name in sorted(metric_scores.keys()):
-        scores = metric_scores[name]
-        avg = sum(scores) / len(scores) if scores else 0
-        print(f"  {name:20s}: {avg:.3f}  (n={len(scores)})")
+    for name, stats in summary.per_metric.items():
+        print(f"  {name:20s}: {stats.avg:.3f}  (n={stats.n})")
 
-    if length_scores:
+    if summary.per_length:
         print()
         print("Per-context-length scores:")
         print("-" * 60)
-        length_order = ["8k", "16k", "32k", "64k", "128k", "256k"]
-        for length in length_order:
-            if length in length_scores:
-                scores = length_scores[length]
-                avg = sum(scores) / len(scores)
-                print(f"  {length:8s}: {avg:.3f}  (n={len(scores)})")
+        for length in ["8k", "16k", "32k", "64k", "128k", "256k"]:
+            if length in summary.per_length:
+                stats = summary.per_length[length]
+                print(f"  {length:8s}: {stats.avg:.3f}  (n={stats.n})")
 
-    if difficulty_scores:
+    if summary.per_difficulty:
         print()
         print("Per-difficulty scores:")
         print("-" * 60)
-        diff_order = ["Easy", "Moderate", "Hard", "Extreme"]
-        for diff in diff_order:
-            if diff in difficulty_scores:
-                scores = difficulty_scores[diff]
-                avg = sum(scores) / len(scores)
-                print(f"  {diff:10s}: {avg:.3f}  (n={len(scores)})")
+        for diff in ["Easy", "Moderate", "Hard", "Extreme"]:
+            if diff in summary.per_difficulty:
+                stats = summary.per_difficulty[diff]
+                print(f"  {diff:10s}: {stats.avg:.3f}  (n={stats.n})")
 
     print()
-    if all_scores:
-        overall = sum(all_scores) / len(all_scores)
-        print(f"Overall: {overall:.3f}  (n={len(all_scores)}, skipped={skipped})")
+    if summary.overall.n:
+        print(f"Overall: {summary.overall.avg:.3f}  (n={summary.overall.n}, skipped={summary.skipped})")
     else:
-        print(f"No scores computed (skipped={skipped})")
+        print(f"No scores computed (skipped={summary.skipped})")
     print("=" * 60)
 
 
-def evaluate_phoenix(config_path, show_errors=False, limit=10000):
+def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None):
+    """Score predictions against gold answers. Shared by evaluate and phoenix."""
+    merged = df_gold.merge(df_pred[["id", "pred_answer"]], on="id", how="inner")
+    print(f"Matched {len(merged)}/{len(df_gold)} examples")
+
+    results = []
+    skipped = 0
+    for _, row in merged.iterrows():
+        r = _score_row(row)
+        if r is None:
+            skipped += 1
+        else:
+            results.append(r)
+
+    summary = _aggregate(results, skipped)
+    _print_summary(summary, results, show_errors)
+
+    if output_metrics:
+        report = EvalReport(summary=summary, examples=results)
+        with open(output_metrics, "w") as f:
+            json.dump(report.model_dump(), f, indent=2)
+        print(f"Metrics written to {output_metrics}")
+
+
+def evaluate_phoenix(config_path, show_errors=False, limit=10000, output_metrics=None):
     """Evaluate RLM predictions by fetching traces from Phoenix.
 
     Reads traces_endpoint, traces_project, and dataset.path from config YAML.
@@ -474,7 +506,7 @@ def evaluate_phoenix(config_path, show_errors=False, limit=10000):
         return
 
     df_gold = pd.read_parquet(cfg.dataset.path)
-    _score_predictions(df_gold, df_pred, show_errors=show_errors)
+    _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics)
 
 
 if __name__ == "__main__":

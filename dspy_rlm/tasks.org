@@ -207,29 +207,56 @@ Right now there are problems with "metric" - it almost always says the answer is
    - ~examples~: per-row results (~id~, ~task~, ~metric~, ~score~,
      ~gold_answer~, ~pred_answer~)
 
-*** Implementation: refactor ~_score_predictions~ into helpers
+*** Pydantic models (in ~config_model.py~)
 
-    Current ~_score_predictions~ does scoring, aggregation, and printing
-    all in one function.  Break it into:
+    Define the JSON output shape as composable Pydantic models.  These
+    serve as both validation and serialization -- ~.model_dump()~ gives
+    us the JSON directly.
 
-    1. ~_score_row(row)~ -- scores a single merged DataFrame row.
-       Returns a dict (~id~, ~gold~, ~pred~, ~metric~, ~task~, ~score~)
-       or ~None~ if skipped (no metric or NaN score).
-    2. ~_aggregate(results)~ -- takes the list of per-row result dicts,
-       groups scores by task/metric/length/difficulty, returns a summary
-       dict with ~per_task~, ~per_metric~, ~per_length~, ~per_difficulty~,
-       ~overall~ keys.
-    3. ~_print_summary(summary, results, show_errors, n_total)~ -- prints
-       the summary to stdout (same output as today).
-    4. ~_write_metrics(output_path, summary, results)~ -- writes the JSON
-       file with ~summary~ and ~examples~ keys.
-    5. ~_score_predictions~ becomes the orchestrator: merge, loop calling
-       ~_score_row~, attach length/difficulty from row, then call
-       ~_aggregate~, ~_print_summary~, and optionally ~_write_metrics~.
+    1. ~GroupStats~ -- reusable stats for any grouping dimension:
+       - ~avg: float~
+       - ~n: int~
+
+    2. ~ScoredExample~ -- one scored row:
+       - ~id: str~
+       - ~task: str~ (task code, e.g. "T1.1")
+       - ~metric: str~ (metric function name, e.g. "f1_score")
+       - ~score: float~
+       - ~gold_answer: list[str]~
+       - ~pred_answer: list[str]~
+       - ~token_length: Optional[str]~ (present if dataset has it)
+       - ~difficulty: Optional[str]~ (present if dataset has it)
+
+    3. ~EvalSummary~ -- aggregated scores across dimensions:
+       - ~per_task: dict[str, GroupStats]~
+       - ~per_metric: dict[str, GroupStats]~
+       - ~per_length: Optional[dict[str, GroupStats]]~
+       - ~per_difficulty: Optional[dict[str, GroupStats]]~
+       - ~overall: GroupStats~
+       - ~skipped: int~
+
+    4. ~EvalReport~ -- top-level output written to JSON:
+       - ~summary: EvalSummary~
+       - ~examples: list[ScoredExample]~
+
+*** Helpers in ~evaluate.py~
+
+    1. ~_score_row(row) -> ScoredExample | None~ -- scores a single
+       merged DataFrame row.  Returns ~None~ if no metric or NaN score.
+    2. ~_aggregate(results: list[ScoredExample]) -> EvalSummary~ --
+       groups scores by task/metric/length/difficulty, builds
+       ~GroupStats~ per group.
+    3. ~_print_summary(summary: EvalSummary, results, show_errors)~ --
+       prints to stdout (same output as today, reads from model fields).
+    4. ~_score_predictions~ becomes orchestrator: merge, loop with
+       ~_score_row~, call ~_aggregate~ and ~_print_summary~, then if
+       ~output_metrics~ is set, build ~EvalReport~ and write
+       ~.model_dump()~ as JSON.
 
 *** Subtasks
 
-    - [ ] Add ~_score_row~, ~_aggregate~, ~_print_summary~, ~_write_metrics~
+    - [ ] Add ~GroupStats~, ~ScoredExample~, ~EvalSummary~, ~EvalReport~ to ~config_model.py~
+    - [ ] Add ~_score_row~, ~_aggregate~, ~_print_summary~ helpers to ~evaluate.py~
     - [ ] Refactor ~_score_predictions~ to use them
     - [ ] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
 
