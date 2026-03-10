@@ -42,22 +42,24 @@ from [[file:dspy_sft_data_collection.org][dspy_sft_data_collection.org]]. The DS
 
 
    
-** TODO Transform LongBench-Pro questions for RLM compatibility
+** DONE Transform LongBench-Pro questions for RLM compatibility
    LongBench-Pro questions include their own ~[Answer]~ output format
    instructions and ~Output example:~ blocks.  This conflicts with RLM's
    ~SUBMIT()~ mechanism -- the model constructs answers in code blocks
    instead of calling ~SUBMIT(answer=...)~ directly.
-   - [ ] Add ~transform_question(text) -> str~ in ~data_utils.py~
+   - [X] Add ~transform_question(text) -> str~ in ~data_utils.py~
      - Strip ~Output example:~ block and everything after it
      - Strip the ~Output the "[Answer]" identifier first...~ sentence
      - Append SUBMIT-compatible hint, e.g. ~SUBMIT(answer=["val1", "val2"])~
-   - [ ] Apply transform to both ~question_nonthinking~ and ~question_thinking~ in ~prepare_longbench_pro()~
-   - [ ] Regenerate ~longbench_pro_en.parquet~ and ~sample_longbench_pro_en.parquet~
-   - [ ] Spot-check transformed questions across different task types
+   - [X] Apply transform to both ~question_nonthinking~ and ~question_thinking~ in ~prepare_longbench_pro()~
+   - [X] Regenerate ~longbench_pro_en.parquet~ and ~sample_longbench_pro_en.parquet~
+   - [X] Spot-check transformed questions across different task types
 
-** TODO quickfix for no examples issue
+** DONE quickfix for no examples issue
 
 Right now there are problems with "metric" - it almost always says the answer is wrong, which means it makes sense to just disable it so it always says the answer is right - we will add this validation in another step because for RLM some answers might just have a little wrong format which we should be able to recover
+
+Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 ** TODO Create ~verify_data.py~
    - [ ] Read JSONL files from output dir
@@ -84,7 +86,7 @@ Right now there are problems with "metric" - it almost always says the answer is
    - [X] Unit tests for ~chars_for_sub_lm~ (token-only, LM-only, both, neither)
    - [ ] Integration smoke test with ~MockInterpreter~ at 100k setting
 
-** TODO Evaluate RLM predictions via Phoenix traces
+** DONE Evaluate RLM predictions via Phoenix traces
 
    Instead of parsing SFT JSONL output (which contains interleaved RLM
    action steps with unresolvable variable references in SUBMIT calls),
@@ -137,14 +139,14 @@ Right now there are problems with "metric" - it almost always says the answer is
 
 *** Subtasks
 
-    - [ ] Add ~fetch_predictions(phoenix_endpoint, project_name, n_traces, dataset_path)~
+    - [X] Add ~fetch_predictions(phoenix_endpoint, project_name, n_traces, dataset_path)~
       - Connect, fetch root spans, filter OK, extract answers, match to rows
       - Return DataFrame with ~id~ and ~pred_answer~ columns
-    - [ ] Add ~evaluate_phoenix(config_path, n_traces, show_errors)~ CLI command
+    - [X] Add ~evaluate_phoenix(config_path, n_traces, show_errors)~ CLI command
       - Read ~traces_endpoint~, ~traces_project~, ~dataset.path~ from config
       - Call ~fetch_predictions~, then score with ~_score_predictions~
     - [X] Investigate Phoenix span schema (see above)
-    - [ ] Test on sample project (~dspy-sft-longbench-sample-opus~: 13 OK / 6 ERROR out of 19)
+    - [X] Test on sample project (~dspy-sft-longbench-sample-opus~: 13 OK / 6 ERROR out of 19)
 
 *** Metric mapping (~secondary_task~ -> metric)
 
@@ -189,16 +191,16 @@ Right now there are problems with "metric" - it almost always says the answer is
    values (e.g. ~token_lengths~ must be from a known set, ~difficulties~
    must be from a known set).
 
-   - [ ] ~uv add pydantic~
-   - [ ] Add ~config.py~ with Pydantic models (~LMConfig~, ~DatasetConfig~,
+   - [X] ~uv add pydantic~
+   - [X] Add ~config.py~ with Pydantic models (~LMConfig~, ~DatasetConfig~,
      ~ModuleConfig~, ~CollectionConfig~, ~Config~)
-   - [ ] Use ~Literal~ types for ~token_lengths~ and ~difficulties~ enums
-   - [ ] Set ~model_config = ConfigDict(extra="forbid")~ to reject typos
-   - [ ] Replace config dict access in ~collect_sft_data.py~ and
+   - [X] Use ~Literal~ types for ~token_lengths~ and ~difficulties~ enums
+   - [X] Set ~model_config = ConfigDict(extra="forbid")~ to reject typos
+   - [X] Replace config dict access in ~collect_sft_data.py~ and
      ~evaluate.py~ with parsed ~Config~ model
-   - [ ] Validate on load: ~Config.model_validate(yaml.safe_load(f))~
+   - [X] Validate on load: ~Config.model_validate(yaml.safe_load(f))~
 
-** TODO Export eval results to JSON via ~--output_metrics~
+** DONE Export eval results to JSON via ~--output_metrics~
 
    Add ~--output_metrics=path.json~ flag to ~evaluate~ and ~evaluate_phoenix~.
    Writes a JSON file with two top-level keys:
@@ -255,12 +257,12 @@ Right now there are problems with "metric" - it almost always says the answer is
 
 *** Subtasks
 
-    - [ ] Add ~GroupStats~, ~ScoredExample~, ~EvalSummary~, ~EvalReport~ to ~config_model.py~
-    - [ ] Add ~_score_row~, ~_aggregate~, ~_print_summary~ helpers to ~evaluate.py~
-    - [ ] Refactor ~_score_predictions~ to use them
-    - [ ] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
+    - [X] Add ~GroupStats~, ~ScoredExample~, ~EvalSummary~, ~EvalReport~ to ~config_model.py~
+    - [X] Add ~_score_row~, ~_aggregate~, ~_print_summary~ helpers to ~evaluate.py~
+    - [X] Refactor ~_score_predictions~ to use them
+    - [X] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
 
-** TODO Export SFT training data from Phoenix traces
+** DONE Export SFT training data from Phoenix traces
 
    Extract per-iteration LM calls from Phoenix into OpenAI chat format
    JSONL, optionally filtering by eval score from ~--output_metrics~.
@@ -293,21 +295,21 @@ Right now there are problems with "metric" - it almost always says the answer is
 
 *** Subtasks
 
-    - [ ] Add ~_fetch_all_spans(config) -> DataFrame~ helper
+    - [X] Add ~_fetch_all_spans(config) -> DataFrame~ helper
       - Fetch with ~root_spans_only=False~
       - Return full spans DataFrame for the project
-    - [ ] Add ~_trace_to_training_examples(trace_spans) -> list[dict]~
+    - [X] Add ~_trace_to_training_examples(trace_spans) -> list[dict]~
       - Given all spans for one trace, extract ~LM.__call__~ spans
       - Filter to ~ChatAdapter.__call__~ parents only (skip ~JSONAdapter~ retries)
       - Build ~{"messages": [system, user, assistant]}~ from each span
-    - [ ] Add ~_match_trace_to_id(root_span, dataset) -> str | None~
+    - [X] Add ~_match_trace_to_id(root_span, dataset) -> str | None~
       - Reuse query-text matching logic from ~fetch_predictions~
-    - [ ] Add ~export_traces(config_path, output, metrics_file, min_score)~ CLI
+    - [X] Add ~export_traces(config_path, output, metrics_file, min_score)~ CLI
       - Load config, fetch spans, group by ~context.trace_id~
       - Match each trace to dataset row ID
       - If ~metrics_file~ provided, filter to IDs with ~score >= min_score~
       - Collect training examples, write JSONL
-    - [ ] Test on sample project, verify output format
+    - [X] Test on sample project, verify output format
 
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~

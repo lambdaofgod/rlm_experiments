@@ -1,0 +1,111 @@
+#+title: Data Status
+
+
+
+* Data status <2026-03-10 Tue> [15:33]
+
+
+** sample (sample_config.yaml)
+
+   - Config: ~sample_config.yaml~
+   - Project: ~dspy-sft-longbench-sample~
+   - Model: qwen3.5-122B-A10B
+   - Dataset: ~sample_longbench_pro_en.parquet~ (6 problems)
+   - Traces: 15 total (13 OK, 2 ERROR)
+   - Unique problems completed: 6/6 (all)
+   - Eval: ~sample_metrics.json~ -- 2/6 passing (score>=1.0), avg=0.771
+
+** sample-opus (opus_sample_config.yaml)
+
+   - Config: ~opus_sample_config.yaml~
+   - Project: ~dspy-sft-longbench-sample-opus~
+   - Model: claude-opus-4.6
+   - Dataset: ~sample_longbench_pro_en.parquet~ (6 problems)
+   - Traces: 18 total (13 OK, 5 ERROR)
+   - Unique problems completed: 6/6 (all)
+   - Eval: none
+
+** full (config.yaml)
+
+   - Config: ~config.yaml~
+   - Project: ~dspy-sft-longbench~
+   - Model: qwen3.5-122B-A10B
+   - Dataset: ~longbench_pro_en.parquet~ (750 problems)
+   - Traces: none (empty project)
+
+** qwen397b (config_qwen397b.yaml / sample_config_qwen397b.yaml)
+
+   - Configs: ~config_qwen397b.yaml~ (full), ~sample_config_qwen397b.yaml~ (sample)
+   - Project: ~dspy-sft-longbench-qwen397b~ (both share same project)
+   - Model: qwen3.5-397B-A17B
+   - Dataset: full=~longbench_pro_en.parquet~ (750), sample=~sample_longbench_pro_en.parquet~ (6)
+   - Traces: 7 total (7 OK, 0 ERROR)
+   - Unique problems completed: 6/750
+   - Eval: none
+
+** short-397B (sample_config_short.yaml)
+
+   - Config: ~sample_config_short.yaml~
+   - Project: ~dspy-sft-longbench-sample-short-397B~
+   - Model: qwen3.5-397B-A17B
+   - Dataset: ~longbench_pro_en.parquet~ filtered to 8k/16k/32k (375 problems)
+   - Traces: none (empty project)
+
+** easy-medium-397B (sample_config_easy_medium.yaml)
+
+   - Config: ~sample_config_easy_medium.yaml~
+   - Project: ~dspy-sft-longbench-sample-easy-medium-397B~
+   - Model: qwen3.5-397B-A17B
+   - Dataset: ~longbench_pro_en.parquet~ filtered to Easy+Moderate (408 problems)
+   - Traces: 195 total (194 OK, 1 ERROR)
+   - Unique problems completed: 194/408 (48%)
+   - Not attempted: 214 (Easy: 142, Moderate: 72)
+   - Eval: ~easy_medium_metrics.json~ -- 90/182 passing (score>=1.0), avg=0.549
+     - 12 OK traces not in eval (T4.x summary tasks, T6.1, T7.3, etc.)
+
+*** Completion by difficulty
+
+    | Difficulty | Completed | Total | % |
+    |------------+-----------+-------+---|
+    | Easy       |       123 |   265 | 46% |
+    | Moderate   |        71 |   143 | 50% |
+
+*** Completion by token_length
+
+    | Length | Completed | Total | % |
+    |--------+-----------+-------+---|
+    | 8k     |        42 |    82 | 51% |
+    | 16k    |        30 |    77 | 39% |
+    | 32k    |        33 |    64 | 52% |
+    | 64k    |        32 |    69 | 46% |
+    | 128k   |        41 |    65 | 63% |
+    | 256k   |        16 |    51 | 31% |
+
+*** Eval scores by task
+
+    | Task  | Avg   | N  |
+    |-------+-------+----|
+    | T1.1  | 0.419 |  6 |
+    | T1.2  | 0.625 |  8 |
+    | T2.1  | 0.789 |  6 |
+    | T2.2  | 0.562 |  3 |
+    | T3.1  | 0.556 |  9 |
+    | T3.2  | 0.417 | 12 |
+    | T5.1  | 0.429 |  7 |
+    | T5.2  | 0.933 | 10 |
+    | T6.1  | 0.200 |  5 |
+    | T6.2  | 0.467 |  7 |
+    | T6.3  | 0.975 |  4 |
+    | T7.1  | 0.000 |  2 |
+    | T7.2  | 0.111 |  9 |
+    | T7.3  | 0.500 |  2 |
+    | T8.1  | 0.556 |  9 |
+    | T8.2  | 0.615 | 13 |
+    | T8.3  | 0.692 | 13 |
+    | T9.1  | 0.633 | 14 |
+    | T9.2  | 0.663 | 19 |
+    | T10.1 | 0.333 |  3 |
+    | T10.2 | 0.143 |  7 |
+    | T11.1 | 0.333 |  6 |
+    | T11.2 | 0.750 |  8 |
+
