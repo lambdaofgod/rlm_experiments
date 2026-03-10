@@ -1,0 +1,30 @@
+* DONE Create data_utils.py - data loading and formatting for SFT training
+  Separate module for loading JSONL data and formatting it for Unsloth SFT.
+
+** DONE load_jsonl_dataset(data_path) -> Dataset
+** DONE format_for_sft(dataset, tokenizer) -> Dataset
+
+* DONE Refactor train_qwen3_5.py to use Pydantic config + YAML
+  Replace fire CLI args with a Pydantic BaseModel loaded from config.yaml.
+
+** DONE Implement config.py with nested Pydantic models
+   - [X] ModelConfig: name, max_seq_length, load_in_4bit
+   - [X] LoraConfig: rank, alpha, dropout
+   - [X] TrainingConfig: max_steps, num_train_epochs, batch_size,
+         gradient_accumulation_steps, learning_rate, warmup_steps,
+         weight_decay, lr_scheduler_type, optim, seed
+   - [X] Validation: exactly one of max_steps/num_train_epochs must be set
+   - [X] SFTTrainingConfig (root): data_path, output_dir, trackio_project (str | None),
+         model: ModelConfig, lora: LoraConfig, training: TrainingConfig
+   - [X] classmethod load(path) that reads YAML and returns SFTTrainingConfig
+
+** DONE Implement config.yaml with current defaults
+   - [X] Nested YAML matching the model structure
+
+** DONE Implement config-driven train_qwen3_5.py
+   - [X] main(config_path) loads config via SFTTrainingConfig.load()
+   - [X] All params come from config.model.X, config.lora.X, config.training.X
+   - [X] SFTConfig built from config.training fields
+   - [X] TrackIO: local mode via trackio_space_id=None, project + timestamped run_name
+
+* DONE Create train_qwen3_5.py - SFT training script for Qwen 3.5 (4B)

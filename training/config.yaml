@@ -1,0 +1,24 @@
+data_path: sft_train_easy_medium_part.jsonl
+output_dir: outputs_qwen3_5
+trackio_project: qwen35partial
+
+model:
+  name: unsloth/Qwen3.5-4B
+  max_seq_length: 32768
+  load_in_4bit: true
+
+lora:
+  rank: 16
+  alpha: 16
+  dropout: 0
+
+training:
+  num_train_epochs: 1
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 2e-4
+  warmup_steps: 5
+  weight_decay: 0.001
+  lr_scheduler_type: linear
+  optim: adamw_8bit
+  seed: 3407
