@@ -191,3 +191,140 @@ The ~messages~ list should look like a standard OpenAI chat format,
 with the system prompt encoding the DSPy signature instructions,
 optional few-shot demo turns, a user turn with field values, and an
 assistant turn containing the structured output.
+
+* Extracting SFT Data from Phoenix Traces
+
+** Why Phoenix instead of BootstrapFinetune JSONL
+
+The JSONL output from ~SFTDataCollector~ (via ~BootstrapFinetune~)
+contains one record per ~Predict.forward~ call, formatted through
+~adapter.format_finetune_data()~.  For RLM this produces one record
+per REPL iteration -- but with unresolvable variable references in
+SUBMIT calls and interleaved action steps that do not form a clean
+training signal.
+
+Phoenix stores the actual LM calls with their full input/output,
+which gives us the real conversation the model saw and produced.
+Combined with our eval metrics (from ~--output_metrics~), we can
+selectively export only traces that scored well.
+
+** What Phoenix stores for an RLM trace
+
+Verified against ~dspy-sft-longbench-sample-easy-medium-397B~ project.
+
+*** Span tree structure
+
+One ~RLM.forward~ root span contains multiple ~Predict.forward~
+children (one per REPL iteration).  Each ~Predict.forward~ contains a
+~ChatAdapter.__call__~ (or ~JSONAdapter.__call__~ on retry), which
+contains an ~LM.__call__~ leaf.
+
+#+BEGIN_EXAMPLE
+RLM.forward (root, CHAIN)
+  Predict.forward (CHAIN)           -- iteration 1
+    Predict(StringSignature).forward
+      ChatAdapter.__call__
+        LM.__call__ (LLM)           -- the actual model call
+  Predict.forward (CHAIN)           -- iteration 2
+    ...
+  Predict.forward (CHAIN)           -- iteration N (has SUBMIT)
+    ...
+#+END_EXAMPLE
+
+Typical traces have 4-8 iterations (~6.2 avg in sample data).
+Occasionally an iteration retries with ~JSONAdapter~ (different system
+prompt); these are parse-error retries and should be skipped.
+
+*** What is in each ~LM.__call__~ span
+
+Each ~LM.__call__~ span is a single-turn exchange (not multi-turn chat):
+
+- ~attributes.input.value~: JSON with ~{"messages": [system, user]}~
+  - System message: DSPy signature instructions (~2989 chars for ChatAdapter)
+  - User message: ~variables_info~ + ~repl_history~ + ~iteration~ fields
+  - User message grows each iteration as ~repl_history~ accumulates
+- ~attributes.output.value~: JSON list, element 0 has ~{"text": "...", "reasoning_content": ...}~
+  - The text contains ~[[ ## reasoning ## ]]~ and ~[[ ## code ## ]]~ fields
+  - Last iteration's text contains ~SUBMIT(answer=...)~
+
+Sizes per iteration (chars, system+user+assistant):
+- Iteration 1: ~5k chars
+- Mid iterations: ~15-25k chars
+- Final iteration: ~35-40k chars
+
+*** Key columns in spans DataFrame
+
+~client.spans.get_spans_dataframe()~ returns:
+
+| Column                              | Use                                       |
+|--------------------------------------+-------------------------------------------|
+| ~name~                               | Filter: ~LM.__call__~, ~RLM.forward~ etc  |
+| ~parent_id~                          | Walk the span tree                        |
+| ~context.trace_id~                   | Group spans into traces                   |
+| ~context.span_id~                    | Unique span identifier (also the index)   |
+| ~start_time~                         | Ordering iterations, deduplication        |
+| ~status_code~                        | ~OK~ or ~ERROR~                           |
+| ~attributes.input.value~             | JSON: prompt/messages sent to LM          |
+| ~attributes.output.value~            | JSON: LM response text                    |
+| ~attributes.llm.model_name~          | Model identifier                          |
+| ~attributes.llm.invocation_parameters~ | ~max_tokens~, ~temperature~            |
+
+~root_spans_only=False~ is required to get child spans.
+
+** What we need for SFT
+
+Each training example should be a single ~{messages: [...]}~ record in
+OpenAI chat format.  For RLM, each REPL iteration is one training
+example:
+
+#+BEGIN_EXAMPLE
+{"messages": [
+  {"role": "system", "content": "<DSPy signature instructions>"},
+  {"role": "user",   "content": "<variables_info + repl_history + iteration>"},
+  {"role": "assistant", "content": "<reasoning + code>"}
+]}
+#+END_EXAMPLE
+
+This is exactly what is in each ~LM.__call__~ span's
+~attributes.input.value~ (system + user) and
+~attributes.output.value~ (assistant).  No reformatting needed -- just
+extract and combine.
+
+** Filtering with the metrics file
+
+The ~--output_metrics~ JSON file (e.g. ~easy_medium_metrics.json~) has
+an ~examples~ array where each entry has:
+
+- ~id~: dataset row ID (matches Phoenix via the query-to-row matching
+  we already do in ~fetch_predictions~)
+- ~score~: 0.0 to 1.0
+- ~task~, ~metric~, ~token_length~, ~difficulty~
+
+Filtering flow:
+1. Load metrics JSON, build set of IDs with ~score >= threshold~
+2. Fetch spans from Phoenix (root_spans_only=False)
+3. For each ~RLM.forward~ root span, match to dataset row ID (reuse
+   existing query-text matching from ~fetch_predictions~)
+4. If ID is in the passing set, collect all ~LM.__call__~ child spans
+   from that trace
+5. Skip ~JSONAdapter~ retry calls (filter by parent span name)
+6. Write each ~LM.__call__~ as one JSONL record
+
+Without a metrics file, export all OK traces (no quality filtering).
+
+** Open questions
+
+- *Per-iteration vs whole-trace training*: exporting each iteration
+  separately means the model learns both early exploration steps and
+  final SUBMIT steps.  Alternative: only export the last N iterations
+  (where the model has enough context to reach SUBMIT).  Needs
+  experimentation.
+
+- *Score threshold*: what cutoff?  Perfect only (~score == 1.0~)?
+  Partial credit (~score >= 0.5~)?  The metrics file has 89/180
+  perfect, 14 partial, 77 zero in the sample run.
+
+- *Context size for training*: final iterations can be ~40k chars.
+  Many finetuning setups truncate at 8k-32k tokens.  May need to
+  filter by ~token_length~ dimension to keep training examples within
+  budget.

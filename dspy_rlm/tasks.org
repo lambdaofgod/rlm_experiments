@@ -260,6 +260,55 @@ Right now there are problems with "metric" - it almost always says the answer is
     - [ ] Refactor ~_score_predictions~ to use them
     - [ ] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
 
+** TODO Export SFT training data from Phoenix traces
+
+   Extract per-iteration LM calls from Phoenix into OpenAI chat format
+   JSONL, optionally filtering by eval score from ~--output_metrics~.
+   See [[file:dspy_sft_data_collection.org][dspy_sft_data_collection.org]] "Extracting SFT Data from
+   Phoenix Traces" for full research notes.
+
+   ~export_traces.py --config_path=config.yaml --output=traces.jsonl~
+
+   Each ~LM.__call__~ span within an OK ~RLM.forward~ trace becomes
+   one JSONL record: ~{"messages": [system, user, assistant]}~.  The
+   span already contains the exact messages -- no reformatting needed.
+
+*** Inputs
+
+    - Phoenix project (via ~traces_endpoint~ + ~traces_project~ from config)
+    - Dataset parquet (for query-to-ID matching)
+    - Optional: metrics JSON from ~--output_metrics~ (for score filtering)
+
+*** Output format
+
+    One JSONL record per RLM iteration:
+
+    #+BEGIN_EXAMPLE
+    {"messages": [
+      {"role": "system", "content": "<DSPy signature instructions>"},
+      {"role": "user",   "content": "<variables_info + repl_history + iteration>"},
+      {"role": "assistant", "content": "<reasoning + code>"}
+    ]}
+    #+END_EXAMPLE
+
+*** Subtasks
+
+    - [ ] Add ~_fetch_all_spans(config) -> DataFrame~ helper
+      - Fetch with ~root_spans_only=False~
+      - Return full spans DataFrame for the project
+    - [ ] Add ~_trace_to_training_examples(trace_spans) -> list[dict]~
+      - Given all spans for one trace, extract ~LM.__call__~ spans
+      - Filter to ~ChatAdapter.__call__~ parents only (skip ~JSONAdapter~ retries)
+      - Build ~{"messages": [system, user, assistant]}~ from each span
+    - [ ] Add ~_match_trace_to_id(root_span, dataset) -> str | None~
+      - Reuse query-text matching logic from ~fetch_predictions~
+    - [ ] Add ~export_traces(config_path, output, metrics_file, min_score)~ CLI
+      - Load config, fetch spans, group by ~context.trace_id~
+      - Match each trace to dataset row ID
+      - If ~metrics_file~ provided, filter to IDs with ~score >= min_score~
+      - Collect training examples, write JSONL
+    - [ ] Test on sample project, verify output format
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~
