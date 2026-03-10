@@ -27,4 +27,26 @@
    - [X] SFTConfig built from config.training fields
    - [X] TrackIO: local mode via trackio_space_id=None, project + timestamped run_name
 
+* TODO Verify trackio hyperparameter/config tracking
+  Check that run configs are actually visible in trackio dashboard.
+
+** TODO Verify TRL auto-logs training args to trackio
+   - [ ] Run training with trackio_project set
+   - [ ] Open dashboard (trackio.show()) and check if training args appear
+** TODO Add config.yaml saving via trackio.save()
+   - [ ] Call trackio.save(config_path) after trainer init
+   - [ ] Verify file appears in trackio project
+** TODO Check trackio.init config= parameter
+   - [ ] Try passing config dict to trackio.init() or trackio.config.update()
+   - [ ] Verify hyperparams are visible/searchable in dashboard
+
+* DONE Implement export_gguf.py - LoRA to GGUF export script
+  Separate script to load base model + LoRA adapters, merge, and export as GGUF.
+  Uses unsloth's native save_pretrained_gguf (Q3.5nb GGUF section).
+
+** DONE Implement export_gguf.py
+   - [X] Load base model + LoRA adapters via FastLanguageModel.from_pretrained
+   - [X] Export via model.save_pretrained_gguf (handles merge + GGUF conversion)
+   - [X] CLI args: config_path, output_dir, quantization (default q8_0)
+
 * DONE Create train_qwen3_5.py - SFT training script for Qwen 3.5 (4B)
