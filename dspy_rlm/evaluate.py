@@ -10,7 +10,8 @@ from collections import defaultdict
 
 import fire
 import pandas as pd
-import yaml
+
+from config_model import load_config
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +266,7 @@ def _extract_answer_from_prediction_repr(output_json_str):
     raise ValueError(f"Cannot parse Prediction repr: {repr_str[:200]}")
 
 
-def fetch_predictions(phoenix_endpoint, project_name, dataset_path):
+def fetch_predictions(phoenix_endpoint, project_name, dataset_path, limit=10000):
     """Fetch RLM predictions from Phoenix traces and match to dataset rows.
 
     HACK: Matching is done by comparing span query text to dataset
@@ -273,17 +274,24 @@ def fetch_predictions(phoenix_endpoint, project_name, dataset_path):
     transform_question for pre-transform spans. This is fragile and needs
     a systematic fix (e.g. passing row id through to spans).
     """
+    import httpx
     from phoenix.client import Client
 
     from data_utils import transform_question
 
     # Strip /v1/traces suffix if present -- Client wants base URL
     base_url = re.sub(r"/v1/traces/?$", "", phoenix_endpoint)
-    client = Client(base_url=base_url)
+    http_client = httpx.Client(
+        base_url=base_url,
+        timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0),
+    )
+    client = Client(http_client=http_client)
 
     spans_df = client.spans.get_spans_dataframe(
         project_name=project_name,
         root_spans_only=True,
+        limit=limit,
+        timeout=300,
     )
 
     # Filter to successful RLM forward spans only
@@ -331,7 +339,7 @@ def fetch_predictions(phoenix_endpoint, project_name, dataset_path):
             answer = _extract_answer_from_prediction_repr(
                 span["attributes.output.value"]
             )
-        except (json.JSONDecodeError, IndexError, KeyError):
+        except (json.JSONDecodeError, IndexError, KeyError, ValueError):
             unmatched += 1
             continue
 
@@ -365,8 +373,13 @@ def _score_predictions(df_gold, df_pred, show_errors=False):
 
     task_scores = defaultdict(list)
     metric_scores = defaultdict(list)
+    length_scores = defaultdict(list)
+    difficulty_scores = defaultdict(list)
     all_scores = []
     skipped = 0
+
+    has_length = "token_length" in merged.columns
+    has_difficulty = "difficulty" in merged.columns
 
     for _, row in merged.iterrows():
         task_code = get_task_code(row["secondary_task"])
@@ -388,6 +401,11 @@ def _score_predictions(df_gold, df_pred, show_errors=False):
         metric_name = metric_fn.__name__
         metric_scores[metric_name].append(score)
         all_scores.append(score)
+
+        if has_length:
+            length_scores[row["token_length"]].append(score)
+        if has_difficulty:
+            difficulty_scores[row["difficulty"]].append(score)
 
         if show_errors and score < 1.0:
             print(f"  [{row['id'][:12]}] {task_code} {metric_name}={score:.3f}")
@@ -412,6 +430,28 @@ def _score_predictions(df_gold, df_pred, show_errors=False):
         avg = sum(scores) / len(scores) if scores else 0
         print(f"  {name:20s}: {avg:.3f}  (n={len(scores)})")
 
+    if length_scores:
+        print()
+        print("Per-context-length scores:")
+        print("-" * 60)
+        length_order = ["8k", "16k", "32k", "64k", "128k", "256k"]
+        for length in length_order:
+            if length in length_scores:
+                scores = length_scores[length]
+                avg = sum(scores) / len(scores)
+                print(f"  {length:8s}: {avg:.3f}  (n={len(scores)})")
+
+    if difficulty_scores:
+        print()
+        print("Per-difficulty scores:")
+        print("-" * 60)
+        diff_order = ["Easy", "Moderate", "Hard", "Extreme"]
+        for diff in diff_order:
+            if diff in difficulty_scores:
+                scores = difficulty_scores[diff]
+                avg = sum(scores) / len(scores)
+                print(f"  {diff:10s}: {avg:.3f}  (n={len(scores)})")
+
     print()
     if all_scores:
         overall = sum(all_scores) / len(all_scores)
@@ -421,24 +461,19 @@ def _score_predictions(df_gold, df_pred, show_errors=False):
     print("=" * 60)
 
 
-def evaluate_phoenix(config_path, show_errors=False):
+def evaluate_phoenix(config_path, show_errors=False, limit=10000):
     """Evaluate RLM predictions by fetching traces from Phoenix.
 
     Reads traces_endpoint, traces_project, and dataset.path from config YAML.
-    Fetches all available spans from the project.
+    Fetches up to `limit` spans from the project (default 10000).
     """
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+    cfg = load_config(config_path)
 
-    phoenix_endpoint = config["traces_endpoint"]
-    project_name = config["traces_project"]
-    dataset_path = config["dataset"]["path"]
-
-    df_pred = fetch_predictions(phoenix_endpoint, project_name, dataset_path)
+    df_pred = fetch_predictions(cfg.traces_endpoint, cfg.traces_project, cfg.dataset.path, limit=limit)
     if df_pred.empty:
         return
 
-    df_gold = pd.read_parquet(dataset_path)
+    df_gold = pd.read_parquet(cfg.dataset.path)
     _score_predictions(df_gold, df_pred, show_errors=show_errors)
 
 
