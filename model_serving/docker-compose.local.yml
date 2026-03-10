@@ -1,0 +1,19 @@
+services:
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports:
+      - "${LLAMA_PORT:-8080}:8080"
+    volumes:
+      - ${MODELS_DIR:-.}/models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      -m /models/${MODEL_FILE:?Set MODEL_FILE to your .gguf filename}
+      -c ${CTX_SIZE:-40960}
+      -ngl 999
+      --host 0.0.0.0
