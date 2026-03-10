@@ -415,6 +415,113 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [ ] Print comparison summary table
     - [ ] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
 
+** TODO Add configurable per-request timeout for LM calls
+
+   When the LLM server drops a connection mid-request (OOM, crash,
+   context overflow), the Python process hangs forever in ~CLOSE_WAIT~
+   because litellm/httpx has no timeout configured.  Observed with
+   finetuned Qwen3.5-4B on llama.cpp -- process hung at example 36
+   with a dead socket.
+
+   Add an optional ~timeout~ field to ~LMConfig~ so that each config
+   can set a per-request timeout appropriate for the model.  Small
+   local models need short timeouts (60s); large API models may need
+   longer or no timeout at all.
+
+*** Config changes (~config_model.py~)
+
+    Add to ~LMConfig~:
+    - ~timeout: Optional[int] = None~ -- per-request timeout in seconds
+
+*** Code changes (~collect_sft_data.py~)
+
+    In ~main()~, pass ~timeout~ to ~dspy.LM()~ when set:
+
+    #+BEGIN_SRC python
+    if cfg.lm.timeout:
+        lm_kwargs["timeout"] = cfg.lm.timeout
+    #+END_SRC
+
+    litellm accepts ~timeout~ as a kwarg and passes it to the HTTP
+    client.  When the timeout fires, litellm raises a timeout error
+    which DSPy's ~Evaluate~ counts as a failed example (increments
+    error counter) and moves on.
+
+*** Example config
+
+    #+BEGIN_EXAMPLE
+    lm:
+      model: "openai/Qwen3.5-4B.Q8_0.gguf"
+      api_base: "http://192.168.1.91:8080/v1"
+      timeout: 60
+    #+END_EXAMPLE
+
+*** Subtasks
+
+    - [ ] Add ~timeout: Optional[int] = None~ to ~LMConfig~
+    - [ ] Pass it through to ~dspy.LM()~ in ~collect_sft_data.py~
+    - [ ] Add ~timeout: 60~ to ~local_config.yaml~
+
+** TODO Categorize failures in eval pipeline
+
+   Currently ~fetch_predictions~ discards all ERROR traces and the
+   metrics JSON only contains successfully scored examples.  When
+   comparing models we need to know not just "how many failed" but
+   *why* they failed -- timeout vs parse error vs server crash vs
+   RLM max iterations exhausted.
+
+*** Failure types to distinguish
+
+    | Type            | Source                                    | How to detect                                                   |
+    |-----------------+-------------------------------------------+-----------------------------------------------------------------|
+    | timeout         | litellm.Timeout / httpx.ReadTimeout       | ERROR span, error message contains "timeout" or "timed out"     |
+    | server_error    | HTTP 500, connection refused, OOM          | ERROR span, error message contains HTTP status or connection err |
+    | max_iterations  | RLM hit 20 iterations without SUBMIT      | OK span (extract fallback runs), but has Predict.forward child  |
+    | parse_error     | DSPy adapter couldn't parse LLM output    | ERROR span, error message contains "AdapterParseError"          |
+    | not_attempted   | Example not in traces at all              | No matching trace for this dataset ID                           |
+
+*** Changes to ~evaluate.py~
+
+    1. ~fetch_predictions~ gains a ~fetch_failures=True~ parameter
+       - Also fetches ~status_code == 'ERROR'~ root spans
+       - Matches them to dataset rows (same query-text matching)
+       - Categorizes each by error message pattern matching
+       - Returns failures as a separate DataFrame or dict
+
+    2. New Pydantic models in ~config_model.py~:
+       - ~FailureCounts~: ~timeout: int~, ~server_error: int~,
+         ~parse_error: int~, ~max_iterations: int~, ~not_attempted: int~
+       - Add ~failures: Optional[FailureCounts]~ to ~EvalReport~
+
+    3. ~evaluate_phoenix~ populates ~failures~ in the output JSON
+
+*** Changes to ~compare_evals.py~
+
+    When failure data is present in both metrics JSONs, show a
+    breakdown in the completion matrix:
+
+    #+BEGIN_EXAMPLE
+    === Failure breakdown: model_a vs model_b ===
+                   model_a    model_b
+    Scored:            182         20
+    Timeout:             3          1
+    Server error:        0          2
+    Max iterations:      5          3
+    Parse error:         2          1
+    Not attempted:     558        723
+    Total:             750        750
+    #+END_EXAMPLE
+
+*** Subtasks
+
+    - [ ] Investigate Phoenix ERROR span format (error message field)
+    - [ ] Add ~FailureCounts~ to ~config_model.py~
+    - [ ] Add failure fetching + categorization to ~fetch_predictions~
+    - [ ] Include ~failures~ in ~EvalReport~ JSON output
+    - [ ] Update ~compare_evals.py~ to show failure breakdown
+    - [ ] Test with ~dspy-sft-longbench-finetuned-qwen4b~ project
+          (has 9 ERROR spans to categorize)
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~

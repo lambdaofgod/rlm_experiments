@@ -114,6 +114,8 @@ def main(config_path="config.yaml"):
         lm_kwargs["api_base"] = cfg.lm.api_base
     if cfg.lm.api_key:
         lm_kwargs["api_key"] = cfg.lm.api_key
+    if cfg.lm.timeout:
+        lm_kwargs["timeout"] = cfg.lm.timeout
     lm = dspy.LM(cfg.lm.model, max_tokens=cfg.lm.max_tokens, **lm_kwargs)
     dspy.configure(lm=lm)
 
