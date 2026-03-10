@@ -311,6 +311,110 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
       - Collect training examples, write JSONL
     - [X] Test on sample project, verify output format
 
+** TODO Support custom OpenAI-compatible API base URL
+
+   Allow pointing ~dspy.LM~ at any OpenAI-compatible endpoint (vLLM,
+   ollama, SGLang, local servers, etc.) via config YAML.  DSPy's ~LM~
+   passes ~**kwargs~ to litellm, so ~api_base~ and ~api_key~ flow
+   through directly.
+
+*** Config changes (~config_model.py~)
+
+    Add optional fields to ~LMConfig~:
+    - ~api_base: Optional[str] = None~ -- OpenAI-compatible base URL
+      (e.g. ~http://localhost:8000/v1~)
+    - ~api_key: Optional[str] = None~ -- API key for the endpoint
+      (if not using env var)
+
+*** Code changes (~collect_sft_data.py~)
+
+    In ~main()~, pass ~api_base~ and ~api_key~ to ~dspy.LM()~ when set:
+
+    #+BEGIN_SRC python
+    lm_kwargs = {}
+    if cfg.lm.api_base:
+        lm_kwargs["api_base"] = cfg.lm.api_base
+    if cfg.lm.api_key:
+        lm_kwargs["api_key"] = cfg.lm.api_key
+    lm = dspy.LM(cfg.lm.model, max_tokens=cfg.lm.max_tokens, **lm_kwargs)
+    #+END_SRC
+
+*** Example config
+
+    #+BEGIN_EXAMPLE
+    lm:
+      model: "openai/Qwen3.5-32B-A10B"
+      api_base: "http://localhost:8000/v1"
+      max_tokens: 32000
+    #+END_EXAMPLE
+
+    For models served with vLLM/SGLang, use the ~openai/~ prefix so
+    litellm routes to the OpenAI-compatible handler.
+
+*** Subtasks
+
+    - [X] Add ~api_base~, ~api_key~ to ~LMConfig~ in ~config_model.py~
+    - [X] Pass them through to ~dspy.LM()~ in ~collect_sft_data.py~
+    - [ ] Create a test config YAML pointing at a local endpoint
+    - [ ] Smoke test with a local vLLM/SGLang server
+
+** TODO Compare evaluation results across models
+
+   Current eval pipeline has survivorship bias: ~fetch_predictions~ drops
+   ERROR traces, and ~_score_predictions~ does an inner join -- so failed
+   attempts are invisible.  A model that fails on hard problems but aces
+   easy ones looks better than one that attempts everything.
+
+   Create ~compare_evals.py~ that does an outer join across two (or more)
+   eval result JSONs to give a fair comparison.
+
+*** Inputs
+
+    - Two or more ~--output_metrics~ JSON files (from ~evaluate.py~)
+    - The dataset parquet (for total problem count and metadata)
+
+*** Output
+
+    For each pair of models, report:
+
+    1. *Completion matrix* -- which problems each model scored vs missed:
+       - Both scored: N
+       - Only model A scored: N (model B failed/not attempted)
+       - Only model B scored: N (model A failed/not attempted)
+       - Neither scored: N
+
+    2. *Head-to-head on shared problems* (both scored):
+       - Model A wins / ties / Model B wins (by score)
+       - Average score per model (on the shared subset only)
+       - Per-task breakdown
+
+    3. *Adjusted overall scores* -- treat missing predictions as score=0:
+       - adjusted_avg = sum(scores) / total_dataset_size
+       - This penalizes models that fail to produce answers
+
+    4. *Per-dimension breakdowns* (token_length, difficulty) with
+       adjusted scores
+
+*** Approach
+
+    1. Load each metrics JSON: build ~{id: ScoredExample}~ dict per model
+    2. Load dataset parquet: get full set of IDs + metadata
+    3. Outer join on ID across models
+    4. Categorize each ID: scored-by-which-models
+    5. Compute head-to-head stats on intersection
+    6. Compute adjusted scores using dataset size as denominator
+    7. Print comparison table; optionally write to JSON
+
+*** Subtasks
+
+    - [ ] Create ~compare_evals.py~ with fire CLI
+    - [ ] Implement ~load_eval_results(metrics_json) -> dict[id, ScoredExample]~
+    - [ ] Implement ~build_comparison(results_a, results_b, dataset_df)~
+      - Outer join, categorize, compute stats
+    - [ ] Implement adjusted scoring (missing = 0)
+    - [ ] Print comparison summary table
+    - [ ] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~

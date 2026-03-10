@@ -109,7 +109,12 @@ def main(config_path="config.yaml"):
     if cfg.traces_endpoint:
         setup_tracing(cfg.traces_endpoint, project_name=cfg.traces_project)
 
-    lm = dspy.LM(cfg.lm.model, max_tokens=cfg.lm.max_tokens)
+    lm_kwargs = {}
+    if cfg.lm.api_base:
+        lm_kwargs["api_base"] = cfg.lm.api_base
+    if cfg.lm.api_key:
+        lm_kwargs["api_key"] = cfg.lm.api_key
+    lm = dspy.LM(cfg.lm.model, max_tokens=cfg.lm.max_tokens, **lm_kwargs)
     dspy.configure(lm=lm)
 
     trainset = load_dataset(

@@ -16,6 +16,8 @@ class LMConfig(BaseModel):
 
     model: str
     max_tokens: int = 32000
+    api_base: Optional[str] = None
+    api_key: Optional[str] = None
 
 
 class DatasetConfig(BaseModel):
