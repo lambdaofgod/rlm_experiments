@@ -166,6 +166,73 @@ Right now there are problems with "metric" - it almost always says the answer is
     | T10.1, T10.2   | SubEM             | Subset exact match                                   |
     | T11.1, T11.2   | Accuracy          | Exact match on first element                         |
 
+** DONE Filter dataset by context length via config
+
+   Add optional ~dataset.token_lengths~ list to config YAML to restrict
+   which context sizes to include (e.g. ~["8k", "16k", "32k"]~).
+   When omitted, include all sizes.  Apply filter in ~load_dataset~
+   before building examples.
+
+   Available values: 8k, 16k, 32k, 64k, 128k, 256k.
+
+** DONE Stratify evals by context length and difficulty
+
+   LongBench-Pro has ~token_length~ (8k, 16k, 32k, 64k, 128k, 256k) and
+   ~difficulty~ (Easy, Moderate, Hard, Extreme) columns.  Add per-dimension
+   score breakdowns to ~_score_predictions~ output.
+
+** DONE Validate config with Pydantic
+
+   Replace raw ~yaml.safe_load~ dict access with a Pydantic ~BaseModel~.
+   Currently typos in config keys (e.g. ~difficulteis~) are silently
+   ignored.  A Pydantic model will catch unknown fields and validate
+   values (e.g. ~token_lengths~ must be from a known set, ~difficulties~
+   must be from a known set).
+
+   - [ ] ~uv add pydantic~
+   - [ ] Add ~config.py~ with Pydantic models (~LMConfig~, ~DatasetConfig~,
+     ~ModuleConfig~, ~CollectionConfig~, ~Config~)
+   - [ ] Use ~Literal~ types for ~token_lengths~ and ~difficulties~ enums
+   - [ ] Set ~model_config = ConfigDict(extra="forbid")~ to reject typos
+   - [ ] Replace config dict access in ~collect_sft_data.py~ and
+     ~evaluate.py~ with parsed ~Config~ model
+   - [ ] Validate on load: ~Config.model_validate(yaml.safe_load(f))~
+
+** TODO Export eval results to JSON via ~--output_metrics~
+
+   Add ~--output_metrics=path.json~ flag to ~evaluate~ and ~evaluate_phoenix~.
+   Writes a JSON file with two top-level keys:
+   - ~summary~: aggregated scores (per-task, per-metric, per-length,
+     per-difficulty, overall) -- same info currently printed to stdout
+   - ~examples~: per-row results (~id~, ~task~, ~metric~, ~score~,
+     ~gold_answer~, ~pred_answer~)
+
+*** Implementation: refactor ~_score_predictions~ into helpers
+
+    Current ~_score_predictions~ does scoring, aggregation, and printing
+    all in one function.  Break it into:
+
+    1. ~_score_row(row)~ -- scores a single merged DataFrame row.
+       Returns a dict (~id~, ~gold~, ~pred~, ~metric~, ~task~, ~score~)
+       or ~None~ if skipped (no metric or NaN score).
+    2. ~_aggregate(results)~ -- takes the list of per-row result dicts,
+       groups scores by task/metric/length/difficulty, returns a summary
+       dict with ~per_task~, ~per_metric~, ~per_length~, ~per_difficulty~,
+       ~overall~ keys.
+    3. ~_print_summary(summary, results, show_errors, n_total)~ -- prints
+       the summary to stdout (same output as today).
+    4. ~_write_metrics(output_path, summary, results)~ -- writes the JSON
+       file with ~summary~ and ~examples~ keys.
+    5. ~_score_predictions~ becomes the orchestrator: merge, loop calling
+       ~_score_row~, attach length/difficulty from row, then call
+       ~_aggregate~, ~_print_summary~, and optionally ~_write_metrics~.
+
+*** Subtasks
+
+    - [ ] Add ~_score_row~, ~_aggregate~, ~_print_summary~, ~_write_metrics~
+    - [ ] Refactor ~_score_predictions~ to use them
+    - [ ] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~

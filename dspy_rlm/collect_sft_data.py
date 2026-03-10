@@ -4,8 +4,9 @@ import os
 import dspy
 import fire
 import pandas as pd
-import yaml
 from dspy.teleprompt import BootstrapFinetune
+
+from config_model import load_config
 
 
 class SFTDataCollector(BootstrapFinetune):
@@ -39,11 +40,21 @@ class SFTDataCollector(BootstrapFinetune):
         return noop_finetune
 
 
-def load_dataset(path, label_field, prompt_template):
+def load_dataset(path, label_field, prompt_template, token_lengths=None, difficulties=None):
     if path.endswith(".parquet"):
         df = pd.read_parquet(path)
     else:
         df = pd.read_csv(path)
+
+    if token_lengths and "token_length" in df.columns:
+        before = len(df)
+        df = df[df["token_length"].isin(token_lengths)]
+        print(f"Filtered to token_lengths {token_lengths}: {before} -> {len(df)} rows")
+
+    if difficulties and "difficulty" in df.columns:
+        before = len(df)
+        df = df[df["difficulty"].isin(difficulties)]
+        print(f"Filtered to difficulties {difficulties}: {before} -> {len(df)} rows")
 
     examples = []
     input_fields = list(prompt_template.keys())
@@ -93,42 +104,36 @@ def setup_tracing(endpoint, project_name=None):
 
 
 def main(config_path="config.yaml"):
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(config_path)
 
-    traces_endpoint = cfg.get("traces_endpoint")
-    if traces_endpoint:
-        setup_tracing(traces_endpoint, project_name=cfg.get("traces_project"))
+    if cfg.traces_endpoint:
+        setup_tracing(cfg.traces_endpoint, project_name=cfg.traces_project)
 
-    lm = dspy.LM(cfg["lm"]["model"], max_tokens=cfg["lm"]["max_tokens"])
+    lm = dspy.LM(cfg.lm.model, max_tokens=cfg.lm.max_tokens)
     dspy.configure(lm=lm)
 
     trainset = load_dataset(
-        cfg["dataset"]["path"],
-        cfg["dataset"]["label_field"],
-        cfg["dataset"]["prompt_template"],
+        cfg.dataset.path,
+        cfg.dataset.label_field,
+        cfg.dataset.prompt_template,
+        token_lengths=cfg.dataset.token_lengths,
+        difficulties=cfg.dataset.difficulties,
     )
 
-    module_args = (
-        cfg["module"]["type"],
-        cfg["module"].get("signature", "context, query -> answer"),
-        cfg["module"].get("kwargs", {}),
-    )
-    student = build_program(*module_args)
+    student = build_program(cfg.module.type, cfg.module.signature, cfg.module.kwargs)
     student.set_lm(lm)
-    teacher = build_program(*module_args)
+    teacher = build_program(cfg.module.type, cfg.module.signature, cfg.module.kwargs)
 
     metrics = {"exact_match": exact_match_metric, "always_true": always_true_metric}
-    metric_name = cfg["collection"].get("metric", "exact_match")
-    metric = metrics[metric_name]
+    metric = metrics[cfg.collection.metric]
 
     collector = SFTDataCollector(
-        output_dir=cfg["collection"]["output_dir"],
+        output_dir=cfg.collection.output_dir,
         metric=metric,
-        num_threads=cfg["collection"]["num_threads"],
+        num_threads=cfg.collection.num_threads,
     )
     collector.compile(student=student, trainset=trainset, teacher=teacher)
-    print(f"SFT data written to {cfg['collection']['output_dir']}")
+    print(f"SFT data written to {cfg.collection.output_dir}")
 
 
 if __name__ == "__main__":
