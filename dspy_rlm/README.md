@@ -23,6 +23,9 @@ traces_project: "dspy-sft-longbench"
 lm:
   model: "openrouter/qwen/qwen3.5-122B-A10B"
   max_tokens: 32000
+  api_base: "http://localhost:8080/v1"  # optional, for OpenAI-compatible endpoints
+  api_key: "dummy"                      # optional, for endpoints requiring auth
+  timeout: 60                           # optional, per-request timeout in seconds
 
 dataset:
   path: "longbench_pro_en.parquet"
@@ -141,6 +144,24 @@ Each output record is one RLM iteration:
 ]}
 ```
 
+### compare_evals.py -- Compare evaluation results across models
+
+Compares two or more evaluation results side by side. Uses an outer
+join on problem IDs so that failures are visible -- missing predictions
+count as score 0 in the adjusted metrics.
+
+```
+uv run python compare_evals.py \
+  --dataset=longbench_pro_en.parquet \
+  easy_medium_metrics.json local_metrics.json
+```
+
+Reports:
+- **Completion matrix** -- which problems each model scored vs missed
+- **Head-to-head** -- wins/ties/losses on shared problems, per-task breakdown
+- **Adjusted overall scores** -- sum(scores) / total_dataset_size
+- **Per-dimension breakdowns** -- by token_length and difficulty
+
 ## Typical workflow
 
 ```
@@ -158,4 +179,9 @@ uv run python export_traces.py \
   --metrics_file=metrics.json \
   --min_score=1.0 \
   --output=sft_train.jsonl
+
+# 4. Compare results between models
+uv run python compare_evals.py \
+  --dataset=longbench_pro_en.parquet \
+  metrics_model_a.json metrics_model_b.json
 ```
