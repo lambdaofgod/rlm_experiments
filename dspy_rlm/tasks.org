@@ -522,6 +522,136 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [ ] Test with ~dspy-sft-longbench-finetuned-qwen4b~ project
           (has 9 ERROR spans to categorize)
 
+** TODO Abstract tracing backend -- decouple from Arize Phoenix
+
+   Phoenix is currently hardcoded in two roles:
+
+   1. *Trace writer* (~collect_sft_data.py~): uses ~phoenix.otel.register~
+      + ~DSPyInstrumentor~ to send OTEL spans.  This is thin -- Phoenix
+      is just one OTEL collector endpoint, any OTEL-compatible backend
+      (Jaeger, Langfuse, Datadog, stdout) could replace it.
+
+   2. *Trace reader* (~evaluate.py~, ~export_traces.py~): uses
+      ~phoenix.client.Client~ to fetch spans as a pandas DataFrame.
+      This is deeply coupled -- column names (~attributes.input.value~,
+      ~status_code~, ~context.trace_id~, ~parent_id~), the
+      ~get_spans_dataframe~ API, query parameters (~root_spans_only~,
+      ~project_name~), and the DataFrame schema are all Phoenix-specific.
+
+*** Goal
+
+    Be able to swap Phoenix for another OTEL backend (Langfuse, Jaeger,
+    local SQLite, flat JSONL files) without touching evaluation or
+    export logic.
+
+*** Approach
+
+    Split into two interfaces:
+
+**** 1. Trace writer abstraction (~tracing.py~)
+
+     Replace ~setup_tracing()~ with a configurable factory.
+
+     #+BEGIN_SRC python
+     def setup_tracing(backend, endpoint, project_name=None):
+         if backend == "phoenix":
+             from phoenix.otel import register
+             tracer_provider = register(endpoint=endpoint, project_name=project_name)
+         elif backend == "otel":
+             # Generic OTEL exporter (works with Jaeger, any OTLP collector)
+             from opentelemetry.sdk.trace import TracerProvider
+             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+             from opentelemetry.sdk.trace.export import BatchSpanProcessor
+             tracer_provider = TracerProvider()
+             tracer_provider.add_span_processor(
+                 BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+             )
+         elif backend == "none":
+             return
+         DSPyInstrumentor().instrument(tracer_provider=tracer_provider)
+     #+END_SRC
+
+     Config change: add ~traces_backend~ field.
+
+     #+BEGIN_EXAMPLE
+     traces_backend: "phoenix"   # or "otel", "none"
+     traces_endpoint: "http://localhost:6006/v1/traces"
+     traces_project: "my-project"
+     #+END_EXAMPLE
+
+**** 2. Trace reader abstraction (~tracing_backend.py~)
+
+     Define an abstract ~TracingBackend~ base class that ~evaluate.py~ and
+     ~export_traces.py~ use instead of calling ~phoenix.client~
+     directly.
+
+     #+BEGIN_SRC python
+     from abc import ABC, abstractmethod
+
+     class TracingBackend(ABC):
+         @abstractmethod
+         def get_root_spans(self, project_name: str, limit: int) -> pd.DataFrame: ...
+
+         @abstractmethod
+         def get_all_spans(self, project_name: str, limit: int) -> pd.DataFrame: ...
+
+     class PhoenixBackend(TracingBackend): ...
+     class JsonlBackend(TracingBackend): ...  # future
+     #+END_SRC
+
+     The returned DataFrames must have a canonical schema:
+
+     | Column                   | Type     | Description                           |
+     |--------------------------+----------+---------------------------------------|
+     | span_id                  | str      | Unique span identifier                |
+     | trace_id                 | str      | Groups spans into a trace             |
+     | parent_id                | str/None | Parent span ID                        |
+     | name                     | str      | Span name (e.g. "RLM.forward")        |
+     | status_code              | str      | "OK" or "ERROR"                       |
+     | status_message           | str/None | Error message if status=ERROR         |
+     | start_time               | datetime | Span start                            |
+     | end_time                 | datetime | Span end                              |
+     | input_value              | str      | JSON string of input args             |
+     | output_value             | str      | JSON string of output                 |
+
+     Implementations:
+     - ~PhoenixBackend~: wraps current ~phoenix.client~ code, maps
+       Phoenix column names to canonical schema
+     - ~JsonlBackend~ (future): reads spans from a local JSONL file
+       (useful for offline eval without a running Phoenix instance)
+
+     The column renaming happens once inside each ~TracingBackend~
+     implementation.  All downstream code (~evaluate.py~,
+     ~export_traces.py~) uses only the canonical column names.
+
+*** Migration plan
+
+    1. Create ~tracing_backend.py~ with ~PhoenixBackend~ that wraps the
+       existing Phoenix client code
+    2. Update ~evaluate.py~ and ~export_traces.py~ to use ~TracingBackend~
+       instead of calling Phoenix directly
+    3. Rename Phoenix-specific column references to canonical names
+    4. Add ~traces_backend~ to config
+    5. Add generic OTEL writer backend
+    6. (Future) Add ~JsonlBackend~ for offline workflows
+
+*** Subtasks
+
+    - [ ] Define canonical span DataFrame schema
+    - [ ] Create ~tracing_backend.py~ with ~TracingBackend~ ABC
+    - [ ] Implement ~PhoenixBackend~
+    - [ ] Refactor ~evaluate.py~ to use ~TracingBackend~
+    - [ ] Refactor ~export_traces.py~ to use ~TracingBackend~
+    - [ ] Add ~traces_backend~ config field to ~Config~ / ~config_model.py~
+    - [ ] Refactor ~setup_tracing~ into a backend-aware factory
+    - [ ] Test end-to-end with a dedicated test config that uses a
+          fresh Phoenix project name (e.g. ~dspy-test-tracing-refactor~)
+          and ~sample_longbench_pro_en.parquet~ (6 examples):
+      - Run ~collect_sft_data.py~ -- traces land in the test project
+      - Run ~evaluate.py phoenix~ -- fetches and scores predictions
+      - Run ~export_traces.py~ -- exports training JSONL
+      - Verify all three produce output without errors
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~

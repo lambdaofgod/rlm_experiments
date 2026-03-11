@@ -94,20 +94,36 @@ def build_program(module_type, signature, kwargs):
     return module_cls(signature, **kwargs)
 
 
-def setup_tracing(endpoint, project_name=None):
+def setup_tracing(backend, endpoint, project_name=None):
     from openinference.instrumentation.dspy import DSPyInstrumentor
-    from phoenix.otel import register
 
-    tracer_provider = register(endpoint=endpoint, project_name=project_name)
+    if backend == "phoenix":
+        from phoenix.otel import register
+
+        tracer_provider = register(endpoint=endpoint, project_name=project_name)
+    elif backend == "otel":
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        tracer_provider = TracerProvider()
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+        )
+    else:
+        print(f"Unknown traces_backend: {backend!r}, skipping tracing")
+        return
+
     DSPyInstrumentor().instrument(tracer_provider=tracer_provider)
-    print(f"OTEL tracing enabled -> {endpoint} (project: {project_name})")
+    print(f"OTEL tracing enabled ({backend}) -> {endpoint} (project: {project_name})")
 
 
 def main(config_path="config.yaml"):
     cfg = load_config(config_path)
 
     if cfg.traces_endpoint:
-        setup_tracing(cfg.traces_endpoint, project_name=cfg.traces_project)
+        backend = cfg.traces_backend or "phoenix"
+        setup_tracing(backend, cfg.traces_endpoint, project_name=cfg.traces_project)
 
     lm_kwargs = {}
     if cfg.lm.api_base:

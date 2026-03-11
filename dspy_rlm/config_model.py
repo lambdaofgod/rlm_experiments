@@ -50,6 +50,7 @@ class CollectionConfig(BaseModel):
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    traces_backend: Optional[str] = None
     traces_endpoint: Optional[str] = None
     traces_project: Optional[str] = None
     lm: LMConfig

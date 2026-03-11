@@ -267,37 +267,22 @@ def _extract_answer_from_prediction_repr(output_json_str):
     raise ValueError(f"Cannot parse Prediction repr: {repr_str[:200]}")
 
 
-def fetch_predictions(phoenix_endpoint, project_name, dataset_path, limit=10000):
-    """Fetch RLM predictions from Phoenix traces and match to dataset rows.
+def fetch_predictions(backend, project_name, dataset_path, limit=10000):
+    """Fetch RLM predictions from traces and match to dataset rows.
 
     HACK: Matching is done by comparing span query text to dataset
     question_nonthinking. Tries direct match first, then applies
     transform_question for pre-transform spans. This is fragile and needs
     a systematic fix (e.g. passing row id through to spans).
     """
-    import httpx
-    from phoenix.client import Client
-
     from data_utils import transform_question
+    from tracing_backend import INPUT_VALUE, NAME, OUTPUT_VALUE, START_TIME, STATUS_CODE
 
-    # Strip /v1/traces suffix if present -- Client wants base URL
-    base_url = re.sub(r"/v1/traces/?$", "", phoenix_endpoint)
-    http_client = httpx.Client(
-        base_url=base_url,
-        timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0),
-    )
-    client = Client(http_client=http_client)
-
-    spans_df = client.spans.get_spans_dataframe(
-        project_name=project_name,
-        root_spans_only=True,
-        limit=limit,
-        timeout=300,
-    )
+    spans_df = backend.get_root_spans(project_name, limit=limit)
 
     # Filter to successful RLM forward spans only
-    rlm_spans = spans_df[spans_df["name"] == "RLM.forward"]
-    ok_spans = rlm_spans[rlm_spans["status_code"] == "OK"].copy()
+    rlm_spans = spans_df[spans_df[NAME] == "RLM.forward"]
+    ok_spans = rlm_spans[rlm_spans[STATUS_CODE] == "OK"].copy()
     print(f"Fetched {len(spans_df)} root spans, {len(rlm_spans)} RLM.forward, {len(ok_spans)} OK")
 
     # Load dataset for matching
@@ -317,7 +302,7 @@ def fetch_predictions(phoenix_endpoint, project_name, dataset_path, limit=10000)
     results = []
     unmatched = 0
     for _, span in ok_spans.iterrows():
-        input_data = json.loads(span["attributes.input.value"])
+        input_data = json.loads(span[INPUT_VALUE])
         query = input_data["input_args"]["query"]
 
         # Try direct match first (post-transform spans)
@@ -337,9 +322,7 @@ def fetch_predictions(phoenix_endpoint, project_name, dataset_path, limit=10000)
             continue
 
         try:
-            answer = _extract_answer_from_prediction_repr(
-                span["attributes.output.value"]
-            )
+            answer = _extract_answer_from_prediction_repr(span[OUTPUT_VALUE])
         except (json.JSONDecodeError, IndexError, KeyError, ValueError):
             unmatched += 1
             continue
@@ -348,7 +331,7 @@ def fetch_predictions(phoenix_endpoint, project_name, dataset_path, limit=10000)
             "id": matched_row["id"],
             "question_nonthinking": matched_row["question_nonthinking"],
             "pred_answer": answer,
-            "start_time": span["start_time"],
+            "start_time": span[START_TIME],
         })
 
     if unmatched:
@@ -494,14 +477,17 @@ def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None)
 
 
 def evaluate_phoenix(config_path, show_errors=False, limit=10000, output_metrics=None):
-    """Evaluate RLM predictions by fetching traces from Phoenix.
+    """Evaluate RLM predictions by fetching traces.
 
-    Reads traces_endpoint, traces_project, and dataset.path from config YAML.
-    Fetches up to `limit` spans from the project (default 10000).
+    Reads traces_backend, traces_endpoint, traces_project, and dataset.path
+    from config YAML. Fetches up to `limit` spans from the project.
     """
-    cfg = load_config(config_path)
+    from tracing_backend import make_tracing_backend
 
-    df_pred = fetch_predictions(cfg.traces_endpoint, cfg.traces_project, cfg.dataset.path, limit=limit)
+    cfg = load_config(config_path)
+    backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
+
+    df_pred = fetch_predictions(backend, cfg.traces_project, cfg.dataset.path, limit=limit)
     if df_pred.empty:
         return
 

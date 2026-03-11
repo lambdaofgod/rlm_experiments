@@ -1,4 +1,4 @@
-"""Export RLM traces from Phoenix as SFT training data in OpenAI chat format.
+"""Export RLM traces as SFT training data in OpenAI chat format.
 
 Each RLM iteration (LM.__call__ span) becomes one JSONL record with
 {"messages": [system, user, assistant]}. Optionally filters by eval
@@ -6,37 +6,21 @@ score from a --output_metrics JSON file.
 """
 
 import json
-import re
 
 import fire
 import pandas as pd
 
 from config_model import load_config
-
-
-def _make_phoenix_client(endpoint):
-    """Create a Phoenix Client with generous timeouts."""
-    import httpx
-    from phoenix.client import Client
-
-    base_url = re.sub(r"/v1/traces/?$", "", endpoint)
-    http_client = httpx.Client(
-        base_url=base_url,
-        timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0),
-    )
-    return Client(http_client=http_client)
-
-
-def _fetch_all_spans(client, project_name, limit=10000):
-    """Fetch all spans (not just root) for a Phoenix project."""
-    spans_df = client.spans.get_spans_dataframe(
-        project_name=project_name,
-        root_spans_only=False,
-        limit=limit,
-        timeout=300,
-    )
-    print(f"Fetched {len(spans_df)} total spans")
-    return spans_df
+from tracing_backend import (
+    INPUT_VALUE,
+    NAME,
+    OUTPUT_VALUE,
+    PARENT_ID,
+    START_TIME,
+    STATUS_CODE,
+    TRACE_ID,
+    make_tracing_backend,
+)
 
 
 def _build_dataset_lookup(dataset_path):
@@ -65,7 +49,7 @@ def _match_trace_to_id(root_span, question_to_row, transformed_to_row):
     """
     from data_utils import transform_question
 
-    input_data = json.loads(root_span["attributes.input.value"])
+    input_data = json.loads(root_span[INPUT_VALUE])
     query = input_data["input_args"]["query"]
 
     matched_row = question_to_row.get(query)
@@ -94,26 +78,30 @@ def _trace_to_training_examples(trace_spans):
     # Build parent lookup: span_id -> span name
     parent_names = {}
     for span_id, span in trace_spans.iterrows():
-        parent_names[span_id] = span["name"]
+        parent_names[span_id] = span[NAME]
 
-    lm_spans = trace_spans[trace_spans["name"] == "LM.__call__"].copy()
-    lm_spans = lm_spans.sort_values("start_time")
+    lm_spans = trace_spans[trace_spans[NAME] == "LM.__call__"].copy()
+    lm_spans = lm_spans.sort_values(START_TIME)
 
     examples = []
     for _, lm_span in lm_spans.iterrows():
         # Skip JSONAdapter retries
-        parent_id = lm_span["parent_id"]
+        parent_id = lm_span[PARENT_ID]
         parent_name = parent_names.get(parent_id, "")
         if parent_name != "ChatAdapter.__call__":
             continue
 
-        input_data = json.loads(lm_span["attributes.input.value"])
-        output_data = json.loads(lm_span["attributes.output.value"])
+        input_data = json.loads(lm_span[INPUT_VALUE])
+        output_data = json.loads(lm_span[OUTPUT_VALUE])
+
+        # output_data[0] can be a dict with "text" key or a plain string
+        first_output = output_data[0]
+        assistant_content = first_output["text"] if isinstance(first_output, dict) else first_output
 
         messages = []
         for msg in input_data["messages"]:
             messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "assistant", "content": output_data[0]["text"]})
+        messages.append({"role": "assistant", "content": assistant_content})
 
         examples.append({"messages": messages})
 
@@ -132,14 +120,14 @@ def _load_passing_ids(metrics_file, min_score):
 
 
 def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_score=1.0, limit=10000):
-    """Export RLM traces from Phoenix as SFT training JSONL.
+    """Export RLM traces as SFT training JSONL.
 
     Args:
         config_path: YAML config with traces_endpoint, traces_project, dataset.path
         output: Output JSONL file path
         metrics_file: Optional metrics JSON from --output_metrics for score filtering
         min_score: Minimum score threshold when using metrics_file (default: 1.0)
-        limit: Max spans to fetch from Phoenix
+        limit: Max spans to fetch
     """
     cfg = load_config(config_path)
 
@@ -154,17 +142,18 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
         print(f"Loaded {len(passing_ids)} IDs with score >= {min_score} from {metrics_file}")
 
     # Fetch all spans
-    client = _make_phoenix_client(cfg.traces_endpoint)
-    all_spans = _fetch_all_spans(client, cfg.traces_project, limit=limit)
+    backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
+    all_spans = backend.get_all_spans(cfg.traces_project, limit=limit)
+    print(f"Fetched {len(all_spans)} total spans")
 
     # Find OK RLM.forward root spans
     root_spans = all_spans[
-        (all_spans["name"] == "RLM.forward") & (all_spans["status_code"] == "OK")
+        (all_spans[NAME] == "RLM.forward") & (all_spans[STATUS_CODE] == "OK")
     ]
     print(f"Found {len(root_spans)} OK RLM.forward traces")
 
     # Deduplicate: keep latest trace per trace_id
-    root_spans = root_spans.sort_values("start_time").copy()
+    root_spans = root_spans.sort_values(START_TIME).copy()
 
     # Build dataset lookups
     question_to_row, transformed_to_row = _build_dataset_lookup(cfg.dataset.path)
@@ -184,7 +173,7 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
             continue
 
         # Deduplicate: keep latest trace per dataset row
-        span_time = root_span["start_time"]
+        span_time = root_span[START_TIME]
         if row_id in seen_ids and seen_ids[row_id] >= span_time:
             continue
         seen_ids[row_id] = span_time
@@ -195,8 +184,8 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
             continue
 
         # Get all spans in this trace
-        trace_id = root_span["context.trace_id"]
-        trace_spans = all_spans[all_spans["context.trace_id"] == trace_id]
+        trace_id = root_span[TRACE_ID]
+        trace_spans = all_spans[all_spans[TRACE_ID] == trace_id]
 
         examples = _trace_to_training_examples(trace_spans)
         all_examples.append((row_id, examples))
