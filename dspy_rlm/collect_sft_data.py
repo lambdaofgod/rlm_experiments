@@ -95,6 +95,17 @@ def build_program(module_type, signature, kwargs):
 
 
 def setup_tracing(backend, endpoint, project_name=None):
+    if backend == "mlflow":
+        import mlflow
+
+        if endpoint:
+            mlflow.set_tracking_uri(endpoint)
+        if project_name:
+            mlflow.set_experiment(project_name)
+        mlflow.dspy.autolog()
+        print(f"MLflow tracing enabled -> {endpoint or 'default'} (experiment: {project_name})")
+        return
+
     from openinference.instrumentation.dspy import DSPyInstrumentor
 
     if backend == "phoenix":

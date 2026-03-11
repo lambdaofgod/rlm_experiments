@@ -242,14 +242,24 @@ def evaluate(
 def _extract_answer_from_prediction_repr(output_json_str):
     """Extract answer string from RLM span output.
 
-    Output is a JSON list where element 0 is a Prediction repr like:
-      Prediction(
-          answer='...VALUE...',
-          trajectory=[...])
+    Handles two formats:
 
-    The answer field can be single-quoted or double-quoted.
+    1. Phoenix/OpenInference: JSON list where element 0 is a Prediction repr:
+         ["Prediction(\\n    answer='...VALUE...',\\n    trajectory=[...])"]
+
+    2. MLflow: JSON dict with "answer" key (Prediction.toDict()):
+         {"answer": "...VALUE...", "trajectory": [...]}
     """
     parsed = json.loads(output_json_str)
+
+    # MLflow format: dict with "answer" key
+    if isinstance(parsed, dict) and "answer" in parsed:
+        answer = str(parsed["answer"])
+        answer = answer.replace("\\n", "\n")
+        answer = re.sub(r"^\[Answer\]\s*", "", answer)
+        return answer
+
+    # Phoenix format: list with Prediction repr string
     repr_str = parsed[0]
 
     # Try both quoting styles: answer='...' and answer="..."

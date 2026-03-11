@@ -652,6 +652,165 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
       - Run ~export_traces.py~ -- exports training JSONL
       - Verify all three produce output without errors
 
+** TODO Add MLflow tracing backend
+
+   Add MLflow as an alternative to Arize Phoenix for both trace writing
+   (instrumentation) and trace reading (evaluation/export).  MLflow has
+   native DSPy integration (~mlflow.dspy.autolog()~) and a client API
+   for fetching traces, so both sides are well-supported.
+
+   The existing ~TracingBackend~ ABC in ~tracing_backend.py~ already
+   defines the reader interface; we need an ~MlflowBackend~
+   implementation.  For the writer side, ~setup_tracing~ in
+   ~collect_sft_data.py~ already has a backend dispatch -- add an
+   ~"mlflow"~ branch.
+
+*** Key differences from Phoenix
+
+    | Aspect           | Phoenix                          | MLflow                                         |
+    |------------------+----------------------------------+------------------------------------------------|
+    | Project/grouping | ~project_name~ (string)          | ~experiment_name~ / ~experiment_id~             |
+    | Trace writer     | ~phoenix.otel.register~          | ~mlflow.dspy.autolog()~ (native DSPy support)  |
+    | Trace reader     | ~phoenix.client.Client~          | ~mlflow.client.MlflowClient~                   |
+    | Span fetch       | ~get_spans_dataframe~ -> pandas  | ~search_traces~ -> list[Trace] objects          |
+    | Span schema      | ~attributes.input.value~ etc.    | ~span.inputs~, ~span.outputs~, ~span.status~   |
+    | Endpoint config  | ~traces_endpoint~ (HTTP URL)     | ~MLFLOW_TRACKING_URI~ env var or explicit URL   |
+
+*** Config changes (~config_model.py~)
+
+    No new fields needed -- reuse existing ~traces_backend~,
+    ~traces_endpoint~, ~traces_project~:
+
+    #+BEGIN_EXAMPLE
+    traces_backend: "mlflow"
+    traces_endpoint: "http://localhost:5000"   # MLflow tracking server URL
+    traces_project: "dspy-sft-longbench"       # maps to MLflow experiment name
+    #+END_EXAMPLE
+
+    The ~traces_endpoint~ sets the MLflow tracking URI.  If omitted,
+    MLflow falls back to ~MLFLOW_TRACKING_URI~ env var or local
+    ~./mlruns~ directory.
+
+*** Trace writer changes (~collect_sft_data.py~)
+
+    Add ~"mlflow"~ branch in ~setup_tracing~:
+
+    #+BEGIN_SRC python
+    elif backend == "mlflow":
+        import mlflow
+        if endpoint:
+            mlflow.set_tracking_uri(endpoint)
+        if project_name:
+            mlflow.set_experiment(project_name)
+        mlflow.dspy.autolog()
+    #+END_SRC
+
+    ~mlflow.dspy.autolog()~ handles DSPy instrumentation natively --
+    no need for ~DSPyInstrumentor~ or OTEL plumbing.  It captures
+    ~dspy.LM~ calls, module forwards, and full chain traces.
+
+*** Trace reader implementation (~tracing_backend.py~)
+
+    Implement ~MlflowBackend(TracingBackend)~:
+
+    #+BEGIN_SRC python
+    class MlflowBackend(TracingBackend):
+        def __init__(self, endpoint: str | None = None):
+            import mlflow
+            if endpoint:
+                mlflow.set_tracking_uri(endpoint)
+            self._client = mlflow.client.MlflowClient()
+
+        def get_root_spans(self, project_name, limit=10000):
+            traces = self._client.search_traces(
+                experiment_ids=[self._get_experiment_id(project_name)],
+                max_results=limit,
+            )
+            rows = []
+            for trace in traces:
+                root = trace.data.spans[0]  # root span
+                rows.append(self._span_to_row(root, trace.info.request_id))
+            return self._to_dataframe(rows)
+
+        def get_all_spans(self, project_name, limit=10000):
+            traces = self._client.search_traces(
+                experiment_ids=[self._get_experiment_id(project_name)],
+                max_results=limit,
+            )
+            rows = []
+            for trace in traces:
+                for span in trace.data.spans:
+                    rows.append(self._span_to_row(span, trace.info.request_id))
+            return self._to_dataframe(rows)
+    #+END_SRC
+
+    Key mapping details:
+    - ~trace.info.request_id~ -> ~trace_id~
+    - ~span.span_id~ -> ~span_id~
+    - ~span.parent_id~ -> ~parent_id~ (None for root)
+    - ~span.name~ -> ~name~
+    - ~span.status.status_code.name~ -> ~status_code~ ("OK" / "ERROR")
+    - ~span.status.description~ -> ~status_message~
+    - ~span.start_time_ns~ / ~span.end_time_ns~ -> timestamps (convert from ns)
+    - ~json.dumps(span.inputs)~ -> ~input_value~
+    - ~json.dumps(span.outputs)~ -> ~output_value~
+
+    *Important*: MLflow's ~span.inputs~ and ~span.outputs~ are dicts,
+    not JSON strings.  Must ~json.dumps~ them to match the canonical
+    schema that downstream code expects (it calls ~json.loads~ on
+    ~input_value~ / ~output_value~).
+
+    Also need to verify the exact structure of ~span.inputs~ for DSPy
+    traces -- it may differ from Phoenix's ~{"input_args": {...}}~
+    format.  The query-matching logic in ~fetch_predictions~ and
+    ~export_traces.py~ expects ~input_args.query~ inside the JSON.
+    If MLflow wraps it differently, add a normalization step in
+    ~_span_to_row~.
+
+*** Factory update (~tracing_backend.py~)
+
+    Update ~make_tracing_backend~ to handle ~"mlflow"~:
+
+    #+BEGIN_SRC python
+    def make_tracing_backend(backend: str, endpoint: str) -> TracingBackend:
+        if backend == "phoenix":
+            return PhoenixBackend(endpoint)
+        elif backend == "mlflow":
+            return MlflowBackend(endpoint)
+        raise ValueError(f"Unknown traces_backend: {backend!r}. Supported: phoenix, mlflow")
+    #+END_SRC
+
+*** Dependencies
+
+    - [ ] ~uv add mlflow~ (includes ~mlflow.client~, ~mlflow.dspy~)
+
+*** Subtasks
+
+    - [ ] ~uv add mlflow~
+    - [ ] Investigate MLflow span schema for DSPy traces
+      - Run a small DSPy program with ~mlflow.dspy.autolog()~
+      - Inspect ~span.inputs~ / ~span.outputs~ structure
+      - Check if ~input_args.query~ path matches Phoenix format
+      - Document any normalization needed in ~_span_to_row~
+    - [ ] Add ~"mlflow"~ branch to ~setup_tracing~ in ~collect_sft_data.py~
+    - [ ] Implement ~MlflowBackend~ in ~tracing_backend.py~
+      - ~__init__~: set tracking URI, create MlflowClient
+      - ~_get_experiment_id~: look up experiment by name
+      - ~_span_to_row~: map MLflow span to canonical dict
+      - ~_to_dataframe~: build DataFrame with canonical schema
+      - ~get_root_spans~: fetch traces, extract root spans
+      - ~get_all_spans~: fetch traces, extract all spans
+    - [ ] Update ~make_tracing_backend~ factory
+    - [ ] Test trace writing: run ~collect_sft_data.py~ with
+          ~traces_backend: mlflow~ on sample dataset, verify traces
+          appear in MLflow UI
+    - [ ] Test trace reading: run ~evaluate.py phoenix~ (the subcommand
+          name is misleading -- it reads from whatever backend is
+          configured) with ~traces_backend: mlflow~, verify predictions
+          are fetched and scored correctly
+    - [ ] Test export: run ~export_traces.py~ with ~traces_backend: mlflow~,
+          verify JSONL output format matches Phoenix-backed output
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~
