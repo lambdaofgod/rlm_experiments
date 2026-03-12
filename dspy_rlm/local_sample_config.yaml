@@ -1,5 +1,5 @@
 traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "dspy-sft-longbench-qwen4b"
+traces_project: "dspy-sft-longbench-qwen4b-sample"
 
 lm:
   model: "openai/Qwen3.5-4B.Q8_0.gguf"
@@ -8,7 +8,7 @@ lm:
   max_tokens: 32000
   timeout: 60
 dataset:
-  path: "longbench_pro_en.parquet"
+  path: "sample_longbench_pro_en.parquet"
   label_field: "answer"
   prompt_template:
     context: "{context}"

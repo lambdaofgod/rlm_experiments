@@ -1,5 +1,5 @@
 traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "dspy-sft-longbench-sample"
+traces_project: "dspy-sft-longbench-qwen3_5_122B_A10B-sample"
 
 lm:
   model: "openrouter/qwen/qwen3.5-122B-A10B"
@@ -12,11 +12,11 @@ dataset:
     query: "{question_nonthinking}"
 
 module:
-  type: "RLM"
+  type: "CustomizableRLM"
   signature: "context, query -> answer"
   kwargs: {}
 
 collection:
   num_threads: 1
   metric: "always_true"
-  output_dir: "./sample_sft_data"
+  output_dir: "./sft_data"

@@ -1,19 +1,17 @@
 traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "dspy-sft-longbench-qwen4b"
+traces_project: "dspy-sft-longbench-sample-easy-medium-397B"
 
 lm:
-  model: "openai/Qwen3.5-4B.Q8_0.gguf"
-  api_base: "http://192.168.1.91:8080/v1"
-  api_key: "dummy"
-  max_tokens: 32000
-  timeout: 60
+  model: "openrouter/qwen/qwen3.5-397B-A17B"
+  max_tokens: 65536
 dataset:
   path: "longbench_pro_en.parquet"
   label_field: "answer"
   prompt_template:
     context: "{context}"
     query: "{question_nonthinking}"
-
+  difficulties: ["Easy", "Moderate"]
+    
 module:
   type: "CustomizableRLM"
   signature: "context, query -> answer"
@@ -22,4 +20,4 @@ module:
 collection:
   num_threads: 1
   metric: "always_true"
-  output_dir: "./local_sft_data"
+  output_dir: "./sample_sft_data"

@@ -2,6 +2,7 @@
 
 from typing import Literal, Optional
 
+import dspy
 import yaml
 from pydantic import BaseModel, ConfigDict
 
@@ -98,3 +99,24 @@ def load_config(config_path: str) -> Config:
     with open(config_path) as f:
         raw = yaml.safe_load(f)
     return Config.model_validate(raw)
+
+
+def load_module_class(module_type: str):
+    """Resolve a module type string to a class.
+
+    Checks local custom modules first, then falls back to built-in dspy modules.
+    """
+    # Local custom modules
+    from customizable_rlm import CustomizableRLM
+
+    _CUSTOM_MODULES = {
+        "CustomizableRLM": CustomizableRLM,
+    }
+
+    cls = _CUSTOM_MODULES.get(module_type) or getattr(dspy, module_type, None)
+    if cls is None:
+        raise ValueError(
+            f"Unknown module type: {module_type!r}. "
+            f"Custom: {list(_CUSTOM_MODULES)}, or any dspy.* module."
+        )
+    return cls

@@ -115,9 +115,9 @@ def exact_match_metric(example, prediction, trace=None):
 
 
 def build_program(module_type, signature, kwargs):
-    module_cls = getattr(dspy, module_type, None)
-    if module_cls is None:
-        raise ValueError(f"Unknown dspy module type: {module_type}")
+    from config_model import load_module_class
+
+    module_cls = load_module_class(module_type)
     return module_cls(signature, **kwargs)
 
 

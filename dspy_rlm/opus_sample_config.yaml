@@ -12,7 +12,7 @@ dataset:
     query: "{question_nonthinking}"
 
 module:
-  type: "RLM"
+  type: "CustomizableRLM"
   signature: "context, query -> answer"
   kwargs: {}
 

@@ -1,5 +1,6 @@
-traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "dspy-sft-longbench-qwen4b"
+traces_backend: "mlflow"
+traces_endpoint: "http://localhost:5000"
+traces_project: "dspy-sft-longbench-mlflow"
 
 lm:
   model: "openai/Qwen3.5-4B.Q8_0.gguf"
@@ -7,8 +8,9 @@ lm:
   api_key: "dummy"
   max_tokens: 32000
   timeout: 60
+
 dataset:
-  path: "longbench_pro_en.parquet"
+  path: "sample_longbench_pro_en.parquet"
   label_field: "answer"
   prompt_template:
     context: "{context}"
@@ -22,4 +24,4 @@ module:
 collection:
   num_threads: 1
   metric: "always_true"
-  output_dir: "./local_sft_data"
+  output_dir: "./mlflow_sft_data"

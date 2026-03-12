@@ -1,5 +1,5 @@
 traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "dspy-sft-longbench-qwen4b"
+traces_project: "dspy-sft-longbench-finetuned-qwen4b"
 
 lm:
   model: "openai/Qwen3.5-4B.Q8_0.gguf"
