@@ -18,7 +18,34 @@ class SFTDataCollector(BootstrapFinetune):
         lms = {pred.lm or dspy.settings.lm for pred in student.predictors()}
         for lm in lms:
             lm.finetune = self._make_noop_finetune(lm)
-        return super().compile(student, trainset=trainset, teacher=teacher)
+
+        # Monkey-patch build_call_data_from_trace to skip FailedPrediction
+        # outputs that DSPy doesn't handle (FailedPrediction lacks .get()).
+        from dspy.teleprompt import bootstrap_finetune
+
+        _original = bootstrap_finetune.build_call_data_from_trace
+
+        def _safe_build(*args, **kwargs):
+            try:
+                return _original(*args, **kwargs)
+            except (AttributeError, TypeError):
+                return None
+
+        bootstrap_finetune.build_call_data_from_trace = _safe_build
+        try:
+            result = super().compile(student, trainset=trainset, teacher=teacher)
+        finally:
+            bootstrap_finetune.build_call_data_from_trace = _original
+        return result
+
+    def _prepare_finetune_data(self, trace_data, lm, pred_ind=None):
+        """Override to filter out None entries from failed predictions."""
+        data, data_format = super()._prepare_finetune_data(trace_data, lm, pred_ind)
+        before = len(data)
+        data = [d for d in data if d is not None]
+        if len(data) < before:
+            print(f"Skipped {before - len(data)} trace entries with failed predictions")
+        return data, data_format
 
     def _make_noop_finetune(self, lm):
         collector = self

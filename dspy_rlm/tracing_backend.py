@@ -131,11 +131,28 @@ class MlflowBackend(TracingBackend):
             )
         return experiment.experiment_id
 
+    def _fetch_traces(self, project_name: str, limit: int) -> list:
+        """Fetch traces with pagination (MLflow caps at 100 per page)."""
+        experiment_id = self._get_experiment_id(project_name)
+        all_traces = []
+        page_token = None
+        page_size = min(limit, 100)
+
+        while len(all_traces) < limit:
+            page = self._client.search_traces(
+                locations=[experiment_id],
+                max_results=page_size,
+                page_token=page_token,
+            )
+            all_traces.extend(page)
+            page_token = page.token if hasattr(page, "token") else None
+            if not page_token or len(page) < page_size:
+                break
+
+        return all_traces[:limit]
+
     def get_root_spans(self, project_name: str, limit: int = 10000) -> pd.DataFrame:
-        traces = self._client.search_traces(
-            locations=[self._get_experiment_id(project_name)],
-            max_results=limit,
-        )
+        traces = self._fetch_traces(project_name, limit)
         rows = []
         for trace in traces:
             if not trace.data.spans:
@@ -145,10 +162,7 @@ class MlflowBackend(TracingBackend):
         return self._to_dataframe(rows)
 
     def get_all_spans(self, project_name: str, limit: int = 10000) -> pd.DataFrame:
-        traces = self._client.search_traces(
-            locations=[self._get_experiment_id(project_name)],
-            max_results=limit,
-        )
+        traces = self._fetch_traces(project_name, limit)
         rows = []
         for trace in traces:
             for span in trace.data.spans:

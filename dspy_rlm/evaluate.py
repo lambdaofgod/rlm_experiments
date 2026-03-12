@@ -210,33 +210,8 @@ def get_metric(secondary_task):
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate(
-    predictions_path,
-    dataset_path="longbench_pro_en.parquet",
-    pred_col="pred_answer",
-    id_col="id",
-    show_errors=False,
-    output_metrics=None,
-):
-    """Evaluate predictions against gold answers.
-
-    Expects a CSV/parquet with at least `id` and `pred_answer` columns.
-    Joins against the dataset on `id` to get gold answers and secondary_task.
-    """
-    df_gold = pd.read_parquet(dataset_path)
-
-    if predictions_path.endswith(".parquet"):
-        df_pred = pd.read_parquet(predictions_path)
-    else:
-        df_pred = pd.read_csv(predictions_path)
-
-    # Normalize column names to match _score_predictions expectations
-    df_pred = df_pred.rename(columns={id_col: "id", pred_col: "pred_answer"})
-    _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics)
-
-
 # ---------------------------------------------------------------------------
-# Phoenix trace-based evaluation
+# Trace-based evaluation
 # ---------------------------------------------------------------------------
 
 def _extract_answer_from_prediction_repr(output_json_str):
@@ -486,24 +461,44 @@ def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None)
         print(f"Metrics written to {output_metrics}")
 
 
-def evaluate_phoenix(config_path, show_errors=False, limit=10000, output_metrics=None):
-    """Evaluate RLM predictions by fetching traces.
+def evaluate(
+    config_path=None,
+    predictions_path=None,
+    dataset_path="longbench_pro_en.parquet",
+    pred_col="pred_answer",
+    id_col="id",
+    show_errors=False,
+    limit=10000,
+    output_metrics=None,
+):
+    """Evaluate RLM predictions.
 
-    Reads traces_backend, traces_endpoint, traces_project, and dataset.path
-    from config YAML. Fetches up to `limit` spans from the project.
+    Two modes:
+    - With --config_path: fetch predictions from traces (Phoenix/MLflow)
+    - With --predictions_path: read predictions from a CSV/parquet file
     """
-    from tracing_backend import make_tracing_backend
+    if config_path:
+        from tracing_backend import make_tracing_backend
 
-    cfg = load_config(config_path)
-    backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
-
-    df_pred = fetch_predictions(backend, cfg.traces_project, cfg.dataset.path, limit=limit)
-    if df_pred.empty:
+        cfg = load_config(config_path)
+        backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
+        df_pred = fetch_predictions(backend, cfg.traces_project, cfg.dataset.path, limit=limit)
+        if df_pred.empty:
+            return
+        df_gold = pd.read_parquet(cfg.dataset.path)
+    elif predictions_path:
+        df_gold = pd.read_parquet(dataset_path)
+        if predictions_path.endswith(".parquet"):
+            df_pred = pd.read_parquet(predictions_path)
+        else:
+            df_pred = pd.read_csv(predictions_path)
+        df_pred = df_pred.rename(columns={id_col: "id", pred_col: "pred_answer"})
+    else:
+        print("Error: provide --config_path (traces) or --predictions_path (file)")
         return
 
-    df_gold = pd.read_parquet(cfg.dataset.path)
     _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics)
 
 
 if __name__ == "__main__":
-    fire.Fire({"evaluate": evaluate, "phoenix": evaluate_phoenix})
+    fire.Fire(evaluate)
