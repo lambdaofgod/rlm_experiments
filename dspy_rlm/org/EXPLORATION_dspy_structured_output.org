@@ -1,0 +1,420 @@
+#+TITLE: DSPy Structured Output with LiteLLM
+#+PROPERTY: header-args:python :session dspy-so :results output
+
+* Overview
+
+DSPy 3.1.3 supports structured output through two main mechanisms:
+1. *Typed output fields* in Signatures (using Python type annotations and Pydantic models)
+2. *Adapters* that control how the LM is prompted and how output is parsed
+
+The key adapter for structured output is ~JSONAdapter~, which uses LiteLLM's
+~response_format~ parameter when the model supports it.
+
+All examples below were tested against a local llamacpp server running
+Qwen3.5-4B.Q8_0 at =http://192.168.1.91:8080=.
+
+* Configuration for Local OpenAI-Compatible API
+
+DSPy uses LiteLLM under the hood. There are two provider prefixes that work
+with local OpenAI-compatible endpoints:
+
+** Option 1: ~openai/~ prefix (JSON mode only)
+
+With ~openai/~, LiteLLM reports ~supports_response_schema=False~ for unknown
+model names. ~JSONAdapter~ falls back to JSON mode (~{"type": "json_object"}~)
+-- the schema is included in the prompt, but not enforced server-side.
+
+#+begin_src python
+import dspy
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+
+lm = dspy.LM(
+    model="openai/Qwen3.5-4B.Q8_0.gguf",
+    api_base=LOCAL_API_BASE,
+    api_key="not-needed",
+)
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+print(f"Configured LM: {lm.model}")
+#+end_src
+
+** Option 2: ~lm_studio/~ prefix (full structured output)
+
+With ~lm_studio/~, LiteLLM globally reports ~supports_response_schema=True~.
+This makes ~JSONAdapter~ send the full Pydantic-derived JSON schema in the
+~response_format~ parameter, which llamacpp and similar servers can use for
+grammar-constrained generation.
+
+#+begin_src python
+import dspy
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+
+lm = dspy.LM(
+    model="lm_studio/Qwen3.5-4B.Q8_0.gguf",
+    api_base=LOCAL_API_BASE,
+    api_key="not-needed",
+)
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+print(f"Configured LM: {lm.model}")
+#+end_src
+
+** Provider comparison
+
+#+begin_src python
+import litellm
+
+for prefix in ["openai", "lm_studio"]:
+    model = f"{prefix}/Qwen3.5-4B.Q8_0.gguf"
+    params = litellm.get_supported_openai_params(model=model, custom_llm_provider=prefix)
+    schema = litellm.supports_response_schema(model=model, custom_llm_provider=prefix)
+    print(f"{prefix:12s} response_format={('response_format' in (params or [])):5}  response_schema={schema}")
+#+end_src
+
+#+RESULTS:
+: openai       response_format= True  response_schema=False
+: lm_studio    response_format= True  response_schema=True
+
+The ~lm_studio~ provider is in LiteLLM's hardcoded list of providers that
+globally support response schema (~PROVIDERS_GLOBALLY_SUPPORT_RESPONSE_SCHEMA~
+in =litellm/utils.py=). This is the recommended prefix for local servers that
+support JSON schema-constrained generation (llamacpp, vllm, etc.).
+
+* Nested Pydantic Models (Tested)
+
+This is the nontrivial case - nested Pydantic models as output types.
+Tested and working with both ~JSONAdapter~ and ~ChatAdapter~.
+
+#+begin_src python
+import dspy
+import pydantic
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+LOCAL_MODEL = "openai/Qwen3.5-4B.Q8_0.gguf"
+
+lm = dspy.LM(model=LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed")
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+
+class Address(pydantic.BaseModel):
+    street: str
+    city: str
+    country: str
+
+class Education(pydantic.BaseModel):
+    degree: str
+    institution: str
+    year: int
+
+class Person(pydantic.BaseModel):
+    name: str
+    age: int
+    address: Address
+    education: list[Education]
+    skills: list[str]
+
+class ExtractPerson(dspy.Signature):
+    """Extract structured person info from text."""
+    text: str = dspy.InputField()
+    person: Person = dspy.OutputField(desc="extracted person information")
+
+predict = dspy.Predict(ExtractPerson)
+result = predict(
+    text="Dr. Maria Garcia, age 34, lives at 42 Oak Street, Berlin, Germany. "
+    "She has a PhD in Computer Science from MIT (2019) and a BSc in Mathematics "
+    "from Stanford (2015). Her skills include Python, machine learning, and "
+    "distributed systems."
+)
+print(f"Name: {result.person.name}")
+print(f"Age: {result.person.age}")
+print(f"Address: {result.person.address}")
+print(f"Education: {result.person.education}")
+print(f"Skills: {result.person.skills}")
+print(f"Types OK: person={isinstance(result.person, Person)}, "
+      f"address={isinstance(result.person.address, Address)}, "
+      f"education={isinstance(result.person.education[0], Education)}")
+#+end_src
+
+#+RESULTS:
+: Name: Maria Garcia
+: Age: 34
+: Address: street='42 Oak Street' city='Berlin' country='Germany'
+: Education: [Education(degree='PhD in Computer Science', institution='MIT', year=2019), Education(degree='BSc in Mathematics', institution='Stanford', year=2015)]
+: Skills: ['Python', 'machine learning', 'distributed systems']
+: Types OK: person=True, address=True, education=True
+
+* Deeply Nested + Optional Fields (Tested)
+
+Three levels of nesting with Optional fields. All correctly parsed,
+including None for missing optional values.
+
+#+begin_src python
+import dspy
+import pydantic
+from typing import Optional
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+LOCAL_MODEL = "openai/Qwen3.5-4B.Q8_0.gguf"
+
+lm = dspy.LM(model=LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed")
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+
+class Coordinate(pydantic.BaseModel):
+    latitude: float
+    longitude: float
+
+class Location(pydantic.BaseModel):
+    name: str
+    coordinates: Coordinate
+    elevation_m: Optional[float] = None
+
+class Observation(pydantic.BaseModel):
+    species: str
+    count: int
+    location: Location
+    notes: Optional[str] = None
+
+class FieldReport(pydantic.BaseModel):
+    researcher: str
+    date: str
+    observations: list[Observation]
+    summary: str
+
+class ExtractFieldReport(dspy.Signature):
+    """Extract a structured wildlife field report from text."""
+    text: str = dspy.InputField()
+    report: FieldReport = dspy.OutputField(desc="structured field report")
+
+predict = dspy.Predict(ExtractFieldReport)
+result = predict(text="""
+On March 5, 2026, researcher Dr. Jane Okafor conducted a field survey in the Serengeti.
+At Seronera Valley (lat -2.45, lon 34.83, elevation 1500m), she observed 12 zebras
+and 3 lions resting near water. She noted the lions appeared well-fed.
+At Moru Kopjes (lat -2.62, lon 34.48), she spotted 8 elephants with 2 calves.
+She summarized the day as showing healthy population levels across all observed species.
+""")
+
+r = result.report
+print(f"Researcher: {r.researcher}")
+print(f"Date: {r.date}")
+for obs in r.observations:
+    print(f"  {obs.count}x {obs.species} at {obs.location.name}")
+    print(f"    Coords: ({obs.location.coordinates.latitude}, {obs.location.coordinates.longitude})")
+    print(f"    Elevation: {obs.location.elevation_m}")
+    print(f"    Notes: {obs.notes}")
+print(f"Summary: {r.summary}")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Researcher: Dr. Jane Okafor
+Date: March 5, 2026
+  12x zebra at Seronera Valley
+    Coords: (-2.45, 34.83)
+    Elevation: 1500.0
+    Notes: None
+  3x lion at Seronera Valley
+    Coords: (-2.45, 34.83)
+    Elevation: 1500.0
+    Notes: appeared well-fed
+  8x elephant at Moru Kopjes
+    Coords: (-2.62, 34.48)
+    Elevation: None
+    Notes: None
+Summary: Day showed healthy population levels across all observed species.
+#+end_example
+
+* Lists of Nested Objects with Boolean Fields (Tested)
+
+#+begin_src python
+import dspy
+import pydantic
+from typing import Optional
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+LOCAL_MODEL = "openai/Qwen3.5-4B.Q8_0.gguf"
+
+lm = dspy.LM(model=LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed")
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+
+class Ingredient(pydantic.BaseModel):
+    name: str
+    amount: str
+    optional: bool
+
+class Step(pydantic.BaseModel):
+    order: int
+    instruction: str
+    duration_minutes: Optional[int] = None
+
+class Recipe(pydantic.BaseModel):
+    name: str
+    servings: int
+    ingredients: list[Ingredient]
+    steps: list[Step]
+
+class ExtractRecipe(dspy.Signature):
+    """Extract a structured recipe."""
+    text: str = dspy.InputField()
+    recipe: Recipe = dspy.OutputField()
+
+predict = dspy.Predict(ExtractRecipe)
+result = predict(
+    text="Classic Pancakes (serves 4): Mix 2 cups flour, 2 eggs, 1.5 cups milk, "
+    "and optionally 1 tbsp sugar. First combine dry ingredients (2 min). "
+    "Then add wet ingredients and mix until smooth (3 min). "
+    "Cook on griddle for 2 min each side."
+)
+rec = result.recipe
+print(f"Recipe: {rec.name} (serves {rec.servings})")
+for ing in rec.ingredients:
+    print(f"  {ing.amount} {ing.name} (optional={ing.optional})")
+for step in rec.steps:
+    print(f"  Step {step.order}: {step.instruction} ({step.duration_minutes} min)")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Recipe: Classic Pancakes (serves 4)
+  2 cups flour (optional=False)
+  2 eggs (optional=False)
+  1.5 cups milk (optional=False)
+  1 tbsp sugar (optional=True)
+  Step 1: Combine dry ingredients (2 min). (2 min)
+  Step 2: Add wet ingredients and mix until smooth (3 min). (3 min)
+  Step 3: Cook on griddle for 2 minutes each side. (4 min)
+#+end_example
+
+* ChainOfThought with Nested Output (Tested)
+
+~dspy.ChainOfThought~ adds a ~reasoning~ field alongside the structured output.
+
+#+begin_src python
+import dspy
+import pydantic
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+LOCAL_MODEL = "openai/Qwen3.5-4B.Q8_0.gguf"
+
+lm = dspy.LM(model=LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed")
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+
+class Vulnerability(pydantic.BaseModel):
+    name: str
+    severity: str
+    affected_component: str
+    remediation: str
+
+class SecurityAudit(pydantic.BaseModel):
+    overall_risk: str
+    vulnerabilities: list[Vulnerability]
+    recommendation: str
+
+class AuditCode(dspy.Signature):
+    """Perform a security audit of code."""
+    code: str = dspy.InputField()
+    audit: SecurityAudit = dspy.OutputField(desc="security audit results")
+
+cot = dspy.ChainOfThought(AuditCode)
+result = cot(code="""
+import sqlite3
+def get_user(username):
+    conn = sqlite3.connect("app.db")
+    cursor = conn.execute(f"SELECT * FROM users WHERE name = '{username}'")
+    return cursor.fetchone()
+""")
+print(f"Reasoning: {result.reasoning[:120]}...")
+print(f"Overall risk: {result.audit.overall_risk}")
+for v in result.audit.vulnerabilities:
+    print(f"  [{v.severity}] {v.name}: {v.remediation}")
+print(f"Recommendation: {result.audit.recommendation}")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Reasoning: The code contains a SQL injection vulnerability. The function get_user constructs an SQL query by directly interpolating the 'username' parameter into...
+Overall risk: High
+  [High] SQL Injection: Replace the f-string query with a parameterized query: cursor.execute('SELECT * FROM users WHERE name = ?', (username,))
+  [Medium] Resource Leak: Use context managers to ensure database connections are properly closed: with sqlite3.connect('app.db') as conn:
+Recommendation: Use parameterized queries (prepared statements) to safely insert user input into SQL queries. Also, ensure proper resource cleanup by using context managers (with statement) for database connections.
+#+end_example
+
+* How JSONAdapter Decides the Strategy
+
+The decision logic in ~JSONAdapter._json_adapter_call_common~ (from =json_adapter.py=):
+
+#+begin_src python :eval no
+# Pseudocode of the adapter's logic
+provider = lm.model.split("/", 1)[0] or "openai"
+params = litellm.get_supported_openai_params(model=lm.model, custom_llm_provider=provider)
+
+if not params or "response_format" not in params:
+    # Model doesn't support response_format at all -> use ChatAdapter parsing
+    return chat_adapter_call(...)
+
+supports_structured = litellm.supports_response_schema(model=lm.model, custom_llm_provider=provider)
+
+if has_open_ended_mapping or not supports_structured:
+    # Fall back to basic JSON mode
+    lm_kwargs["response_format"] = {"type": "json_object"}
+else:
+    # Use full structured output with JSON schema
+    lm_kwargs["response_format"] = pydantic_model_from_signature
+#+end_src
+
+For our local llamacpp endpoint:
+- With ~openai/~ prefix: ~supports_response_schema~ is False, so JSON mode only
+- With ~lm_studio/~ prefix: ~supports_response_schema~ is True, so full schema is sent
+
+With ~lm_studio/~, the full Pydantic-derived JSON schema is passed via
+~response_format~, enabling grammar-constrained generation on the server side.
+With ~openai/~, DSPy falls back to JSON mode and includes the schema in the
+prompt text with client-side Pydantic validation. Both work for nested models.
+
+* Limitations and Gotchas
+
+** Open-ended dict types force fallback
+
+~dict[str, Any]~ causes ~JSONAdapter~ to fall back to basic JSON mode because
+structured outputs require explicitly declared properties. Use Pydantic models.
+
+#+begin_src python :eval no
+# BAD - open-ended dict
+class BadSig(dspy.Signature):
+    text: str = dspy.InputField()
+    metadata: dict[str, str] = dspy.OutputField()
+
+# GOOD - explicit model
+class Metadata(pydantic.BaseModel):
+    author: str
+    date: str
+    source: str
+
+class GoodSig(dspy.Signature):
+    text: str = dspy.InputField()
+    metadata: Metadata = dspy.OutputField()
+#+end_src
+
+** API key is required
+
+LiteLLM requires a non-empty ~api_key~ even for local endpoints.
+Pass any non-empty string.
+
+** Use ~lm_studio/~ prefix for full structured output with local servers
+
+With ~openai/~ prefix, ~supports_response_schema~ returns False for unknown
+model names, so you only get JSON mode. Use ~lm_studio/~ prefix instead -- it is
+in LiteLLM's hardcoded whitelist and enables full structured output (the JSON
+schema is sent via ~response_format~, enabling server-side grammar constraints).
+
+* Summary
+
+| Feature                  | ChatAdapter (default) | JSONAdapter (openai/) | JSONAdapter (lm_studio/) |
+|--------------------------+-----------------------+-----------------------+--------------------------|
+| Pydantic output types    | Yes (prompt-based)    | Yes (JSON mode)       | Yes (full schema)        |
+| response_format sent     | No                    | json_object           | Pydantic JSON schema     |
+| Server-side enforcement  | No                    | JSON only             | Full schema              |
+| Nested models            | Yes (tested)          | Yes (tested)          | Yes (tested)             |
+| Optional fields          | Yes (tested)          | Yes (tested)          | Yes (tested)             |
+| 3-level nesting          | Yes (tested)          | Yes (tested)          | Yes (tested)             |
+| ChainOfThought + nested  | Yes                   | Yes (tested)          | Yes (tested)             |
+| Local OpenAI-compat APIs | Yes                   | Yes                   | Yes                      |
