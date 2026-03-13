@@ -11,7 +11,7 @@ from collections import defaultdict
 import fire
 import pandas as pd
 
-from config_model import EvalReport, EvalSummary, GroupStats, ScoredExample, load_config
+from config_model import ErrorInfo, ErrorSummary, EvalReport, EvalSummary, GroupStats, ScoredExample, load_config
 
 
 # ---------------------------------------------------------------------------
@@ -252,23 +252,61 @@ def _extract_answer_from_prediction_repr(output_json_str):
     raise ValueError(f"Cannot parse Prediction repr: {repr_str[:200]}")
 
 
-def fetch_predictions(backend, project_name, dataset_path, limit=10000):
+def _collect_error_info(error_spans):
+    """Collect ErrorInfo and message counts from non-OK spans."""
+    from tracing_backend import INPUT_VALUE, STATUS_MESSAGE
+
+    errors = []
+    by_message = defaultdict(int)
+
+    for span_id, span in error_spans.iterrows():
+        msg = span.get(STATUS_MESSAGE) or "unknown error"
+        msg_str = str(msg).strip()
+
+        # Extract a short query snippet for context
+        query_snippet = None
+        try:
+            input_data = json.loads(span[INPUT_VALUE])
+            query = input_data.get("input_args", {}).get("query", "")
+            if query:
+                query_snippet = query[:120]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
+        by_message[msg_str] += 1
+        errors.append(ErrorInfo(
+            span_id=str(span_id),
+            status_message=msg_str,
+            query_snippet=query_snippet,
+        ))
+
+    return ErrorSummary(total=len(errors), by_message=dict(by_message), errors=errors)
+
+
+def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10000):
     """Fetch RLM predictions from traces and match to dataset rows.
 
     HACK: Matching is done by comparing span query text to dataset
     question_nonthinking. Tries direct match first, then applies
     transform_question for pre-transform spans. This is fragile and needs
     a systematic fix (e.g. passing row id through to spans).
+
+    Returns (predictions_df, error_summary_or_none).
     """
     from data_utils import transform_question
     from tracing_backend import INPUT_VALUE, NAME, OUTPUT_VALUE, START_TIME, STATUS_CODE
 
     spans_df = backend.get_root_spans(project_name, limit=limit)
 
-    # Filter to successful RLM forward spans only
-    rlm_spans = spans_df[spans_df[NAME] == "RLM.forward"]
+    # Filter to module forward spans
+    forward_name = f"{module_type}.forward"
+    rlm_spans = spans_df[spans_df[NAME] == forward_name]
     ok_spans = rlm_spans[rlm_spans[STATUS_CODE] == "OK"].copy()
-    print(f"Fetched {len(spans_df)} root spans, {len(rlm_spans)} RLM.forward, {len(ok_spans)} OK")
+    error_spans = rlm_spans[rlm_spans[STATUS_CODE] != "OK"]
+    print(f"Fetched {len(spans_df)} root spans, {len(rlm_spans)} {forward_name}, {len(ok_spans)} OK, {len(error_spans)} errors")
+
+    # Collect error info
+    error_summary = _collect_error_info(error_spans) if len(error_spans) > 0 else None
 
     # Load dataset for matching
     dataset = pd.read_parquet(dataset_path)
@@ -324,7 +362,7 @@ def fetch_predictions(backend, project_name, dataset_path, limit=10000):
 
     if not results:
         print("No predictions matched!")
-        return pd.DataFrame(columns=["id", "pred_answer"])
+        return pd.DataFrame(columns=["id", "pred_answer"]), error_summary
 
     df = pd.DataFrame(results)
 
@@ -332,7 +370,7 @@ def fetch_predictions(backend, project_name, dataset_path, limit=10000):
     df = df.sort_values("start_time").groupby("id").last().reset_index()
     print(f"Matched {len(df)} unique predictions")
 
-    return df[["id", "pred_answer"]]
+    return df[["id", "pred_answer"]], error_summary
 
 
 def _score_row(row):
@@ -388,8 +426,33 @@ def _aggregate(results, skipped):
     )
 
 
-def _print_summary(summary, results, show_errors):
+def _print_error_summary(error_summary, show_errors):
+    """Print error breakdown from non-OK spans."""
+    if error_summary is None:
+        return
+
+    print()
+    print(f"Trace errors: {error_summary.total}")
+    print("-" * 60)
+    for msg, count in sorted(error_summary.by_message.items(), key=lambda x: -x[1]):
+        # Truncate long messages for the summary line
+        display_msg = msg if len(msg) <= 120 else msg[:117] + "..."
+        print(f"  {count:4d}x  {display_msg}")
+
+    if show_errors and error_summary.errors:
+        print()
+        print("Error details:")
+        for err in error_summary.errors:
+            query_str = f" query={err.query_snippet!r}" if err.query_snippet else ""
+            print(f"  [{err.span_id[:12]}]{query_str}")
+            print(f"       {err.status_message}")
+    print()
+
+
+def _print_summary(summary, results, show_errors, error_summary=None):
     """Print evaluation summary to stdout."""
+    _print_error_summary(error_summary, show_errors)
+
     if show_errors:
         for r in results:
             if r.score < 1.0:
@@ -437,7 +500,7 @@ def _print_summary(summary, results, show_errors):
     print("=" * 60)
 
 
-def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None):
+def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None, error_summary=None):
     """Score predictions against gold answers. Shared by evaluate and phoenix."""
     merged = df_gold.merge(df_pred[["id", "pred_answer"]], on="id", how="inner")
     print(f"Matched {len(merged)}/{len(df_gold)} examples")
@@ -452,10 +515,10 @@ def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None)
             results.append(r)
 
     summary = _aggregate(results, skipped)
-    _print_summary(summary, results, show_errors)
+    _print_summary(summary, results, show_errors, error_summary=error_summary)
 
     if output_metrics:
-        report = EvalReport(summary=summary, examples=results)
+        report = EvalReport(summary=summary, examples=results, error_summary=error_summary)
         with open(output_metrics, "w") as f:
             json.dump(report.model_dump(), f, indent=2)
         print(f"Metrics written to {output_metrics}")
@@ -477,12 +540,13 @@ def evaluate(
     - With --config_path: fetch predictions from traces (Phoenix/MLflow)
     - With --predictions_path: read predictions from a CSV/parquet file
     """
+    error_summary = None
     if config_path:
         from tracing_backend import make_tracing_backend
 
         cfg = load_config(config_path)
         backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
-        df_pred = fetch_predictions(backend, cfg.traces_project, cfg.dataset.path, limit=limit)
+        df_pred, error_summary = fetch_predictions(backend, cfg.traces_project, cfg.dataset.path, cfg.module.type, limit=limit)
         if df_pred.empty:
             return
         df_gold = pd.read_parquet(cfg.dataset.path)
@@ -497,7 +561,7 @@ def evaluate(
         print("Error: provide --config_path (traces) or --predictions_path (file)")
         return
 
-    _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics)
+    _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics, error_summary=error_summary)
 
 
 if __name__ == "__main__":

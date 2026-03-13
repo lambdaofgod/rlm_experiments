@@ -90,9 +90,22 @@ class EvalSummary(BaseModel):
     skipped: int
 
 
+class ErrorInfo(BaseModel):
+    span_id: str
+    status_message: Optional[str] = None
+    query_snippet: Optional[str] = None
+
+
+class ErrorSummary(BaseModel):
+    total: int
+    by_message: dict[str, int]
+    errors: list[ErrorInfo]
+
+
 class EvalReport(BaseModel):
     summary: EvalSummary
     examples: list[ScoredExample]
+    error_summary: Optional[ErrorSummary] = None
 
 
 def load_config(config_path: str) -> Config:

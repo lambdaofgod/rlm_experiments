@@ -146,11 +146,12 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
     all_spans = backend.get_all_spans(cfg.traces_project, limit=limit)
     print(f"Fetched {len(all_spans)} total spans")
 
-    # Find OK RLM.forward root spans
+    # Find OK module forward spans
+    forward_name = f"{cfg.module.type}.forward"
     root_spans = all_spans[
-        (all_spans[NAME] == "RLM.forward") & (all_spans[STATUS_CODE] == "OK")
+        (all_spans[NAME] == forward_name) & (all_spans[STATUS_CODE] == "OK")
     ]
-    print(f"Found {len(root_spans)} OK RLM.forward traces")
+    print(f"Found {len(root_spans)} OK {forward_name} traces")
 
     # Deduplicate: keep latest trace per trace_id
     root_spans = root_spans.sort_values(START_TIME).copy()

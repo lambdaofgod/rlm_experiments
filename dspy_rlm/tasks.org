@@ -81,6 +81,18 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
    - [X] Override ~_get_system_prompt~ (or post-init patch) to replace capacity figure
    - [X] Implement ~_inject_tips~ (batching block + context-length warning for <=100k)
 
+*** DONE Use module type from config for span name matching in eval/export
+
+    ~evaluate.py~ and ~export_traces.py~ hardcode ~"RLM.forward"~ as the
+    span name filter.  Now that configs use ~CustomizableRLM~, the span
+    name is ~CustomizableRLM.forward~, so ~fetch_predictions~ returns
+    zero matches.  Derive span name from ~cfg.module.type~ instead.
+    Also fix ~README.md~ outdated ~evaluate.py phoenix~ subcommand.
+
+    - [X] Update ~fetch_predictions~ to filter on ~f"{module_type}.forward"~
+    - [X] Update ~export_traces.py~ span filter likewise
+    - [X] Fix ~README.md~ CLI examples and config sample
+
 ** DONE Test ~CustomizableRLM~
    - [X] Unit tests for prompt string mutations
    - [X] Unit tests for ~chars_for_sub_lm~ (token-only, LM-only, both, neither)
@@ -147,6 +159,25 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
       - Call ~fetch_predictions~, then score with ~_score_predictions~
     - [X] Investigate Phoenix span schema (see above)
     - [X] Test on sample project (~dspy-sft-longbench-sample-opus~: 13 OK / 6 ERROR out of 19)
+    - [X] Report non-OK trace errors in evaluation output
+
+*** DONE Report non-OK trace errors in evaluation output
+
+    ~evaluate.py~ silently drops spans with ~status_code != "OK"~ via the
+    filter in ~fetch_predictions~. The ~status_message~ column from the
+    tracing backend contains error details (iteration limit exceeded,
+    timeout, parse errors, etc.) but this information is never surfaced.
+
+    For understanding model failure modes, it is important to know *why*
+    traces failed -- not just how many.
+
+    - [X] In ~fetch_predictions~, collect non-OK spans and their
+      ~status_message~ values
+    - [X] Print a summary of error counts grouped by error type/message
+      (always, not gated by ~--show_errors~)
+    - [X] When ~--show_errors~ is set, print individual error details
+      (span id, query snippet, status_message)
+    - [X] Include error breakdown in ~--output_metrics~ JSON report
 
 *** Metric mapping (~secondary_task~ -> metric)
 
@@ -810,6 +841,139 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           are fetched and scored correctly
     - [ ] Test export: run ~export_traces.py~ with ~traces_backend: mlflow~,
           verify JSONL output format matches Phoenix-backed output
+
+** TODO Enable structured output via config flag
+
+   Add an optional config flag to switch DSPy's adapter from the default
+   ~ChatAdapter~ to ~JSONAdapter~, enabling structured output for modules
+   that use typed Pydantic output fields.
+
+   See [[file:org/EXPLORATION_dspy_structured_output.org][EXPLORATION_dspy_structured_output.org]] for tested examples
+   and provider behavior details.
+
+*** Background
+
+    DSPy supports structured output through ~JSONAdapter~, which uses
+    LiteLLM's ~response_format~ parameter.  The level of enforcement
+    depends on the model provider prefix:
+
+    | Provider prefix | ~response_format~ sent   | Server-side enforcement |
+    |-----------------+--------------------------+-------------------------|
+    | ~openai/~       | ~{"type": "json_object"}~ | JSON only (no schema)   |
+    | ~lm_studio/~    | Pydantic JSON schema     | Full schema             |
+
+    For local OpenAI-compatible servers (llamacpp, vLLM, SGLang), the
+    ~lm_studio/~ prefix is needed for full structured output -- it is in
+    LiteLLM's hardcoded ~PROVIDERS_GLOBALLY_SUPPORT_RESPONSE_SCHEMA~
+    list, so ~supports_response_schema~ returns True.
+
+    With ~openai/~ prefix, ~JSONAdapter~ falls back to basic JSON mode:
+    the schema is included in the prompt text but not enforced server-side.
+    Both work for nested Pydantic models, but ~lm_studio/~ gives grammar-
+    constrained generation.
+
+*** Config changes (~config_model.py~)
+
+    Add optional field to top-level ~Config~ (or ~ModuleConfig~):
+    - ~adapter: Optional[Literal["chat", "json"]] = None~ -- which DSPy
+      adapter to use.  ~None~ / ~"chat"~ = default ~ChatAdapter~;
+      ~"json"~ = ~JSONAdapter~ for structured output.
+
+*** Code changes (~collect_sft_data.py~)
+
+    In ~main()~, after ~dspy.configure(lm=lm)~, set the adapter:
+
+    #+BEGIN_SRC python
+    adapter = None
+    if cfg.adapter == "json":
+        adapter = dspy.JSONAdapter()
+    dspy.configure(lm=lm, adapter=adapter)
+    #+END_SRC
+
+*** Limitations
+
+    - ~dict[str, Any]~ output fields force ~JSONAdapter~ to fall back to
+      basic JSON mode.  Use explicit Pydantic models instead.
+    - For full schema enforcement with local servers, the model name in
+      config must use ~lm_studio/~ prefix (not ~openai/~).
+    - ~RLM~ module uses ~ChatAdapter~ internally and may not benefit from
+      ~JSONAdapter~ -- needs testing.
+
+*** Subtasks
+
+    - [ ] Add ~adapter~ field to config model (~config_model.py~)
+    - [ ] Wire adapter selection in ~collect_sft_data.py~
+    - [ ] Test with ~JSONAdapter~ + ~lm_studio/~ prefix on local server
+    - [ ] Test with ~JSONAdapter~ + ~openai/~ prefix (JSON mode fallback)
+    - [ ] Verify ~ChainOfThought~ works with structured output
+    - [ ] Document provider prefix implications in config examples
+
+** DONE Catch ~AdapterParseError~ instead of falling back to ~JSONAdapter~
+
+   When ~ChatAdapter~ parses the LM response for ~generate_action~ and
+   finds ~reasoning~ but no ~[[ ## code ## ]]~ section, it raises
+   ~AdapterParseError~.  ~ChatAdapter.__call__~ (chat_adapter.py:74)
+   catches *all* exceptions and retries with a fresh ~JSONAdapter()~,
+   which makes a second LM call with heavier JSON-formatted prompting.
+   This compounds across iterations and inflates RLM wall-clock time.
+
+   Fix: catch ~AdapterParseError~ around the ~self.generate_action(...)~
+   call in an overridden ~_execute_iteration~ (and ~_aexecute_iteration~)
+   in ~CustomizableRLM~.  When caught, return a ~Prediction~-like object
+   with the partially parsed ~reasoning~ (available via
+   ~error.parsed_result~) and ~code=""~.  The empty code will produce a
+   no-op REPL output and the next iteration gets feedback to include the
+   code field.
+
+*** Why not make ~code~ optional
+
+    The ~code~ field is defined at rlm.py:290 as
+    ~dspy.OutputField(..., type_=str)~.  Changing it to ~Optional[str]~
+    would live in the upstream dspy package, and
+    ~RLM._process_execution_result~ (line 475) calls
+    ~_strip_code_fences(pred.code)~ which would blow up on ~None~.
+    Catching the error downstream in ~CustomizableRLM~ avoids touching
+    upstream code.
+
+*** Approach
+
+    1. Override ~_execute_iteration~ in ~CustomizableRLM~
+    2. Wrap ~self.generate_action(...)~ in a ~try/except AdapterParseError~
+    3. On catch: build a stub prediction with ~reasoning~ from
+       ~error.parsed_result.get("reasoning", "")~ and ~code=""~
+    4. Let the existing flow handle it -- ~_strip_code_fences("")~ returns
+       ~""~, ~repl.execute("")~ produces no output, iteration continues
+    5. Optionally: disable the fallback entirely by using
+       ~dspy.settings.context(adapter=ChatAdapter(use_json_adapter_fallback=False))~
+       around the call, so the ~AdapterParseError~ propagates immediately
+       instead of being swallowed by the fallback path first
+
+*** Key locations
+
+    - ~AdapterParseError~: ~dspy/utils/exceptions.py~
+      - Has ~parsed_result: dict | None~ with successfully parsed fields
+    - ~ChatAdapter.__call__~: ~dspy/adapters/chat_adapter.py:64-86~
+      - Catches all exceptions, falls back to ~JSONAdapter()~
+      - ~use_json_adapter_fallback~ flag controls this (default ~True~)
+    - ~ChatAdapter.parse~: ~dspy/adapters/chat_adapter.py:239-244~
+      - Raises ~AdapterParseError(parsed_result=fields)~ when fields
+        are incomplete
+    - ~Predict.forward~: ~dspy/predict/predict.py:191~
+      - Uses ~settings.adapter or ChatAdapter()~
+      - Can be overridden per-call via ~dspy.settings.context(adapter=...)~
+    - ~RLM._execute_iteration~: ~dspy/predict/rlm.py:506-534~
+      - Calls ~self.generate_action(...)~ then ~repl.execute(code)~
+    - ~RLM._aexecute_iteration~: ~dspy/predict/rlm.py:593-621~
+      - Async version, same structure
+
+*** Subtasks
+
+    - [ ] Override ~_execute_iteration~ in ~CustomizableRLM~
+    - [ ] Override ~_aexecute_iteration~ in ~CustomizableRLM~
+    - [ ] Verify ~repl.execute("")~ is a safe no-op (or handle gracefully)
+    - [ ] Add a ~logger.warning~ when the fallback triggers so it shows
+          in traces / logs
+    - [ ] Test with a mock LM that returns reasoning but no code field
 
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~

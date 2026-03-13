@@ -10,7 +10,7 @@ traces from Phoenix for finetuning.
 uv sync
 ```
 
-Requires a Phoenix instance for trace-based workflows (default: `http://localhost:6006`).
+Requires a tracing backend (Phoenix or MLflow) for trace-based workflows.
 
 ## Config
 
@@ -37,7 +37,7 @@ dataset:
   difficulties: ["Easy", "Moderate"]      # optional filter
 
 module:
-  type: "RLM"
+  type: "CustomizableRLM"
   signature: "context, query -> answer"
   kwargs: {}
 
@@ -65,13 +65,22 @@ Traces are sent to Phoenix if `traces_endpoint` is set.
 
 ### evaluate.py -- Evaluate predictions
 
-Two subcommands: `evaluate` (from a predictions file) and `phoenix`
-(from Phoenix traces).
+Two modes: from traces (via `--config_path`) or from a predictions file
+(via `--predictions_path`).
+
+**From traces (Phoenix or MLflow):**
+
+```
+uv run python evaluate.py \
+  --config_path=config.yaml \
+  --show_errors \
+  --output_metrics=metrics.json
+```
 
 **From a predictions file:**
 
 ```
-uv run python evaluate.py evaluate \
+uv run python evaluate.py \
   --predictions_path=predictions.csv \
   --dataset_path=longbench_pro_en.parquet \
   --show_errors \
@@ -80,25 +89,11 @@ uv run python evaluate.py evaluate \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--predictions_path` | (required) | CSV/parquet with `id` and `pred_answer` columns |
-| `--dataset_path` | `longbench_pro_en.parquet` | Gold answers parquet |
+| `--config_path` | `None` | YAML config for trace-based eval (`traces_endpoint`, `traces_project`, `module.type`) |
+| `--predictions_path` | `None` | CSV/parquet with `id` and `pred_answer` columns |
+| `--dataset_path` | `longbench_pro_en.parquet` | Gold answers parquet (used with `--predictions_path`) |
 | `--pred_col` | `pred_answer` | Column name for predictions |
 | `--id_col` | `id` | Column name for row IDs |
-| `--show_errors` | `False` | Print mismatched predictions |
-| `--output_metrics` | `None` | Write detailed JSON report to this path |
-
-**From Phoenix traces:**
-
-```
-uv run python evaluate.py phoenix \
-  --config_path=config.yaml \
-  --show_errors \
-  --output_metrics=metrics.json
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--config_path` | (required) | YAML config with `traces_endpoint`, `traces_project` |
 | `--show_errors` | `False` | Print mismatched predictions |
 | `--limit` | `10000` | Max spans to fetch |
 | `--output_metrics` | `None` | Write detailed JSON report to this path |
@@ -168,8 +163,8 @@ Reports:
 # 1. Run RLM over dataset, traces go to Phoenix
 uv run python collect_sft_data.py --config_path=config.yaml
 
-# 2. Evaluate predictions from Phoenix traces
-uv run python evaluate.py phoenix \
+# 2. Evaluate predictions from traces
+uv run python evaluate.py \
   --config_path=config.yaml \
   --output_metrics=metrics.json
 

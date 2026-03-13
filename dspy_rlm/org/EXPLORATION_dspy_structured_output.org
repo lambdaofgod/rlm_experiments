@@ -418,3 +418,251 @@ schema is sent via ~response_format~, enabling server-side grammar constraints).
 | 3-level nesting          | Yes (tested)          | Yes (tested)          | Yes (tested)             |
 | ChainOfThought + nested  | Yes                   | Yes (tested)          | Yes (tested)             |
 | Local OpenAI-compat APIs | Yes                   | Yes                   | Yes                      |
+
+* Does structured output help RLM?
+
+RLM uses ~dspy.Predict~ internally for per-iteration action generation
+(~reasoning~ + ~code~ fields) and for fallback answer extraction.  The
+globally configured adapter controls how those Predict calls format the
+prompt and parse the output.  Does switching to ~JSONAdapter~ (full
+structured output with ~lm_studio/~ prefix) help or hurt?
+
+** Setup
+
+#+BEGIN_SRC python :session EXPLORATION_dspy_structured_output.org  :exports both
+import time
+import pandas as pd
+import dspy
+import tqdm
+
+LOCAL_API_BASE = "http://192.168.1.91:8080/v1"
+LOCAL_MODEL = "lm_studio/Qwen3.5-4B.Q8_0.gguf"
+
+df = pd.read_parquet("../sample_longbench_pro_en.parquet")
+print(f"Loaded {len(df)} examples")
+for i, row in df.iterrows():
+    print(f"  [{i}] token_length={row['token_length']}, "
+          f"chars={len(row['context'])}, "
+          f"task={row['secondary_task'][:40]}")
+
+examples = []
+for _, row in df.iterrows():
+    examples.append({
+        "context": row["context"],
+        "query": row["question_nonthinking"],
+        "gold_answer": row["answer"],
+        "token_length": row["token_length"],
+        "task": row["secondary_task"],
+    })
+#+end_src
+
+#+RESULTS:
+: Loaded 6 examples
+:   [0] token_length=32k, chars=163627, task=T1.1 Global Cohesive Retrieval
+:   [1] token_length=8k, chars=25199, task=T5.1 Full-Sentence Citation Alignment
+:   [2] token_length=16k, chars=68029, task=T6.3 Global Frequency Analysis
+:   [3] token_length=64k, chars=319265, task=T6.3 Global Frequency Analysis
+:   [4] token_length=128k, chars=488835, task=T6.1 Large-Scale Document Clustering
+:   [5] token_length=256k, chars=1117201, task=T5.2 Key-Statement Citation Alignment
+
+** Run 1: ChatAdapter (baseline)
+
+#+BEGIN_SRC python :session EXPLORATION_dspy_structured_output.org  :exports both :async
+lm = dspy.LM(LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed",
+             max_tokens=32000, timeout=120)
+dspy.configure(lm=lm)
+
+rlm_chat = dspy.RLM("context, query -> answer")
+
+chat_results = []
+for i in tqdm.trange(len(examples)):
+    ex = examples[i]
+    print(f"\n{'='*60}")
+    print(f"Example {i} (ChatAdapter) -- {ex['token_length']}")
+    print(f"{'='*60}")
+    t0 = time.time()
+    try:
+        result = rlm_chat(context=ex["context"], query=ex["query"])
+        elapsed = time.time() - t0
+        chat_results.append({
+            "answer": result.answer,
+            "elapsed": elapsed,
+            "error": None,
+        })
+        print(f"  elapsed: {elapsed:.1f}s")
+        print(f"  answer: {result.answer[:200]}")
+    except Exception as e:
+        elapsed = time.time() - t0
+        chat_results.append({"answer": None, "elapsed": elapsed, "error": str(e)})
+        print(f"  ERROR after {elapsed:.1f}s: {e}")
+
+print(f"\nChatAdapter done. {len(chat_results)} results.")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+  0% 0/6 [00:00<?, ?it/s]
+============================================================
+Example 0 (ChatAdapter) -- 32k
+============================================================
+  elapsed: 3.7s
+  answer: ['2015', '2015']
+ 17% 1/6 [00:03<00:18,  3.68s/it]
+============================================================
+Example 1 (ChatAdapter) -- 8k
+============================================================
+
+2026/03/12 15:49:43 WARNING dspy.predict.rlm: RLM reached max iterations, using extract to get final output
+  elapsed: 5.9s
+  answer: 01 Rule 1001;
+02 Rule 9011;
+03 Rule 204;
+04 Rule 7001;
+05 Rule 9037;
+06 Rule 9032;
+07 Rule 2016;
+08 Rule 2007;
+09 Rule 3002;
+10 Rule 2016;
+11 Rule 602;
+12 Rule 7007;
+13 Rule 54;
+14 Rule 54;
+15 Rule 80
+ 33% 2/6 [00:09<00:19,  5.00s/it]
+============================================================
+Example 2 (ChatAdapter) -- 16k
+============================================================
+  elapsed: 0.9s
+  answer: ['that', 'have', 'would', 'this', 'went']
+ 50% 3/6 [00:10<00:09,  3.11s/it]
+============================================================
+Example 3 (ChatAdapter) -- 64k
+============================================================
+  elapsed: 0.9s
+  answer: ['have', 'income', 'stock', 'also', 'future']
+ 67% 4/6 [00:11<00:04,  2.23s/it]
+============================================================
+Example 4 (ChatAdapter) -- 128k
+============================================================
+  elapsed: 1.3s
+  answer: ['E', 'A', 'B', 'C', 'D', 'H', 'F', 'G']
+ 83% 5/6 [00:12<00:01,  1.89s/it]
+============================================================
+Example 5 (ChatAdapter) -- 256k
+============================================================
+2026/03/12 15:50:24 WARNING dspy.predict.rlm: RLM reached max iterations, using extract to get final output
+  elapsed: 380.8s
+  answer: P16
+100% 6/6 [06:33<00:00, 65.56s/it] 
+
+ChatAdapter done. 6 results.
+#+end_example
+
+** Run 2: JSONAdapter (structured output)
+
+#+BEGIN_SRC python :session EXPLORATION_dspy_structured_output.org  :exports both :async
+lm = dspy.LM(LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed",
+             max_tokens=32000, timeout=120)
+dspy.configure(lm=lm, adapter=dspy.JSONAdapter())
+
+rlm_json = dspy.RLM("context, query -> answer")
+
+json_results = []
+for i in tqdm.trange(len(examples)):
+    ex = examples[i]
+    print(f"\n{'='*60}")
+    print(f"Example {i} (JSONAdapter) -- {ex['token_length']}")
+    print(f"{'='*60}")
+    t0 = time.time()
+    try:
+        result = rlm_json(context=ex["context"], query=ex["query"])
+        elapsed = time.time() - t0
+        json_results.append({
+            "answer": result.answer,
+            "elapsed": elapsed,
+            "error": None,
+        })
+        print(f"  elapsed: {elapsed:.1f}s")
+        print(f"  answer: {result.answer[:200]}")
+    except Exception as e:
+        elapsed = time.time() - t0
+        json_results.append({"answer": None, "elapsed": elapsed, "error": str(e)})
+        print(f"  ERROR after {elapsed:.1f}s: {e}")
+
+print(f"\nJSONAdapter done. {len(json_results)} results.")
+#+end_src
+
+#+RESULTS:
+: 7174cf25-a66f-469d-a7e0-154e695c7931
+
+** Run 3: CustomizableRLM with ChatAdapter (small_model_tips)
+
+Uses ~CustomizableRLM~ from this project, which patches the system prompt
+with the actual sub-LM context budget and injects batching/context-length
+tips for small models.
+
+#+BEGIN_SRC python :session EXPLORATION_dspy_structured_output.org  :exports both :async
+import sys
+sys.path.insert(0, "..")
+from customizable_rlm import CustomizableRLM
+
+lm = dspy.LM(LOCAL_MODEL, api_base=LOCAL_API_BASE, api_key="not-needed",
+             max_tokens=32000, timeout=120)
+dspy.configure(lm=lm)
+
+rlm_custom = CustomizableRLM(
+    "context, query -> answer",
+    small_model_tips=True,
+    sub_lm_context_tokens=32768,
+)
+
+custom_results = []
+for i in tqdm.trange(len(examples)):
+    ex = examples[i]
+    print(f"\n{'='*60}")
+    print(f"Example {i} (CustomizableRLM) -- {ex['token_length']}")
+    print(f"{'='*60}")
+    t0 = time.time()
+    try:
+        result = rlm_custom(context=ex["context"], query=ex["query"])
+        elapsed = time.time() - t0
+        custom_results.append({
+            "answer": result.answer,
+            "elapsed": elapsed,
+            "error": None,
+        })
+        print(f"  elapsed: {elapsed:.1f}s")
+        print(f"  answer: {result.answer[:200]}")
+    except Exception as e:
+        elapsed = time.time() - t0
+        custom_results.append({"answer": None, "elapsed": elapsed, "error": str(e)})
+        print(f"  ERROR after {elapsed:.1f}s: {e}")
+
+print(f"\nCustomizableRLM done. {len(custom_results)} results.")
+#+end_src
+
+** Comparison
+
+#+BEGIN_SRC python :session EXPLORATION_dspy_structured_output.org  :exports both :async
+print(f"{'='*70}")
+print(f"{'COMPARISON: ChatAdapter vs JSONAdapter':^70}")
+print(f"{'='*70}")
+
+for i, ex in enumerate(examples):
+    chat = chat_results[i]
+    json_ = json_results[i]
+    custom = custom_results[i]
+
+    print(f"\n--- Example {i} ({ex['token_length']}, {ex['task'][:30]}) ---")
+    print(f"Gold: {ex['gold_answer'][:120]}")
+
+    for label, r in [("ChatAdapter", chat), ("JSONAdapter", json_), ("CustomRLM", custom)]:
+        if r["error"]:
+            print(f"  {label}: ERROR - {r['error'][:80]}")
+        else:
+            print(f"  {label}: {r['answer'][:120]}  ({r['elapsed']:.1f}s)")
+#+end_src
+
+#+RESULTS:
+: 41a8b44f-5954-45e1-9a7c-b80b3f30cd87

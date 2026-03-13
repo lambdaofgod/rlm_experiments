@@ -2,16 +2,24 @@
 
 Replaces the hardcoded 500K chars capacity assumption in the system prompt
 with a runtime parameter derived from sub_lm_context_tokens or litellm metadata.
+
+Also catches AdapterParseError in generate_action calls to avoid expensive
+JSONAdapter fallback retries when ChatAdapter partially parses the response.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import dspy
-from dspy.predict.rlm import RLM
+from dspy.adapters.chat_adapter import ChatAdapter
+from dspy.primitives.code_interpreter import CodeInterpreter, CodeInterpreterError
+from dspy.primitives.prediction import Prediction
+from dspy.primitives.repl_types import REPLHistory, REPLVariable
+from dspy.predict.rlm import RLM, _strip_code_fences
+from dspy.utils.exceptions import AdapterParseError
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
@@ -107,6 +115,103 @@ class CustomizableRLM(RLM):
         if tips:
             instructions = instructions + "\n\n" + "\n\n".join(tips)
         return instructions
+
+    def _generate_action_no_fallback(self, **kwargs) -> Prediction:
+        """Call generate_action with JSONAdapter fallback disabled.
+
+        If ChatAdapter partially parses the response (e.g. reasoning but no
+        code), builds a stub Prediction with code="" so the iteration can
+        continue without an expensive JSONAdapter retry.
+        """
+        no_fallback_adapter = ChatAdapter(use_json_adapter_fallback=False)
+        try:
+            with dspy.settings.context(adapter=no_fallback_adapter):
+                return self.generate_action(**kwargs)
+        except AdapterParseError as e:
+            reasoning = ""
+            if e.parsed_result and isinstance(e.parsed_result, dict):
+                reasoning = e.parsed_result.get("reasoning", "")
+            logger.warning(
+                "ChatAdapter parsed reasoning but missed code field; "
+                "returning empty code instead of falling back to JSONAdapter"
+            )
+            return Prediction(reasoning=reasoning, code="")
+
+    async def _agenerate_action_no_fallback(self, **kwargs) -> Prediction:
+        """Async version of _generate_action_no_fallback."""
+        no_fallback_adapter = ChatAdapter(use_json_adapter_fallback=False)
+        try:
+            with dspy.settings.context(adapter=no_fallback_adapter):
+                return await self.generate_action.acall(**kwargs)
+        except AdapterParseError as e:
+            reasoning = ""
+            if e.parsed_result and isinstance(e.parsed_result, dict):
+                reasoning = e.parsed_result.get("reasoning", "")
+            logger.warning(
+                "ChatAdapter parsed reasoning but missed code field; "
+                "returning empty code instead of falling back to JSONAdapter"
+            )
+            return Prediction(reasoning=reasoning, code="")
+
+    def _execute_iteration(
+        self,
+        repl: CodeInterpreter,
+        variables: list[REPLVariable],
+        history: REPLHistory,
+        iteration: int,
+        input_args: dict[str, Any],
+        output_field_names: list[str],
+    ) -> Prediction | REPLHistory:
+        """Execute one iteration, catching AdapterParseError instead of falling back."""
+        variables_info = [variable.format() for variable in variables]
+        action = self._generate_action_no_fallback(
+            variables_info=variables_info,
+            repl_history=history,
+            iteration=f"{iteration + 1}/{self.max_iterations}",
+        )
+        if self.verbose:
+            logger.info(
+                f"RLM iteration {iteration + 1}/{self.max_iterations}\n"
+                f"Reasoning: {action.reasoning}\nCode:\n{action.code}"
+            )
+
+        try:
+            code = _strip_code_fences(action.code)
+            result = repl.execute(code, variables=dict(input_args))
+        except (CodeInterpreterError, SyntaxError) as e:
+            result = f"[Error] {e}"
+
+        return self._process_execution_result(action, result, history, output_field_names)
+
+    async def _aexecute_iteration(
+        self,
+        repl: CodeInterpreter,
+        variables: list[REPLVariable],
+        history: REPLHistory,
+        iteration: int,
+        input_args: dict[str, Any],
+        output_field_names: list[str],
+    ) -> Prediction | REPLHistory:
+        """Async version: execute one iteration, catching AdapterParseError."""
+        variables_info = [variable.format() for variable in variables]
+        pred = await self._agenerate_action_no_fallback(
+            variables_info=variables_info,
+            repl_history=history,
+            iteration=f"{iteration + 1}/{self.max_iterations}",
+        )
+        if self.verbose:
+            logger.info(
+                f"RLM iteration {iteration + 1}/{self.max_iterations}\n"
+                f"Reasoning: {pred.reasoning}\nCode:\n{pred.code}"
+            )
+
+        try:
+            code = _strip_code_fences(pred.code)
+            result = repl.execute(code, variables=dict(input_args))
+        except (CodeInterpreterError, SyntaxError) as e:
+            result = f"[Error] {e}"
+
+        return self._process_execution_result(pred, result, history, output_field_names)
 
     @staticmethod
     def chars_for_sub_lm(
