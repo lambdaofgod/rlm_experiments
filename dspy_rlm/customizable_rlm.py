@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Any, TYPE_CHECKING
 
 import dspy
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHAR_LIMIT = 500_000
+
+
+class REPLTimeoutError(Exception):
+    """Raised when the code interpreter exceeds repl_timeout."""
 
 
 class CustomizableRLM(RLM):
@@ -46,6 +51,7 @@ class CustomizableRLM(RLM):
         sub_lm_context_tokens: int | None = None,
         small_model_tips: bool = False,
         safety_factor: float = 0.8,
+        repl_timeout: int | float = 300,
         **kwargs,
     ) -> None:
         sub_lm = kwargs.get("sub_lm")
@@ -55,6 +61,7 @@ class CustomizableRLM(RLM):
             safety_factor=safety_factor,
         )
         self._small_model_tips = small_model_tips
+        self.repl_timeout = repl_timeout
 
         super().__init__(signature, **kwargs)
 
@@ -175,10 +182,26 @@ class CustomizableRLM(RLM):
                 f"Reasoning: {action.reasoning}\nCode:\n{action.code}"
             )
 
+        timed_out = False
+
+        def _kill_deno():
+            nonlocal timed_out
+            timed_out = True
+            repl.deno_process.kill()
+
         try:
             code = _strip_code_fences(action.code)
-            result = repl.execute(code, variables=dict(input_args))
+            timer = threading.Timer(self.repl_timeout, _kill_deno)
+            timer.start()
+            try:
+                result = repl.execute(code, variables=dict(input_args))
+            finally:
+                timer.cancel()
         except (CodeInterpreterError, SyntaxError) as e:
+            if timed_out:
+                raise REPLTimeoutError(
+                    f"Code interpreter timed out after {self.repl_timeout}s"
+                ) from e
             result = f"[Error] {e}"
 
         return self._process_execution_result(action, result, history, output_field_names)
@@ -205,10 +228,26 @@ class CustomizableRLM(RLM):
                 f"Reasoning: {pred.reasoning}\nCode:\n{pred.code}"
             )
 
+        timed_out = False
+
+        def _kill_deno():
+            nonlocal timed_out
+            timed_out = True
+            repl.deno_process.kill()
+
         try:
             code = _strip_code_fences(pred.code)
-            result = repl.execute(code, variables=dict(input_args))
+            timer = threading.Timer(self.repl_timeout, _kill_deno)
+            timer.start()
+            try:
+                result = repl.execute(code, variables=dict(input_args))
+            finally:
+                timer.cancel()
         except (CodeInterpreterError, SyntaxError) as e:
+            if timed_out:
+                raise REPLTimeoutError(
+                    f"Code interpreter timed out after {self.repl_timeout}s"
+                ) from e
             result = f"[Error] {e}"
 
         return self._process_execution_result(pred, result, history, output_field_names)

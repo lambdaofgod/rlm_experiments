@@ -975,6 +975,61 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           in traces / logs
     - [ ] Test with a mock LM that returns reasoning but no code field
 
+** TODO Add hard timeout to ~CustomizableRLM._execute_iteration~
+
+   The code interpreter (~PythonInterpreter.execute()~) does
+   ~while True: readline()~ with no timeout. When the model generates
+   expensive code (e.g. char-by-char JSON parsing of 144k chars in
+   Pyodide/WASM), it blocks forever. See [[file:debugging.org][debugging.org]], example 71.
+
+   When this happens the whole RLM call should fail immediately --
+   retrying another iteration makes zero sense if the interpreter
+   got stuck.
+
+*** Approach
+
+    ~threading.Timer~ kills the Deno subprocess after ~repl_timeout~
+    seconds. The ~CodeInterpreterError~ that ~execute()~ raises is
+    caught and re-raised as ~REPLTimeoutError~ (a new exception that
+    nothing else catches), so it propagates straight out of ~forward()~.
+
+    #+BEGIN_SRC python
+    import threading
+
+    class REPLTimeoutError(Exception):
+        """Raised when the code interpreter exceeds repl_timeout."""
+
+    # In _execute_iteration, wrap repl.execute:
+    try:
+        code = _strip_code_fences(action.code)
+        timer = threading.Timer(self.repl_timeout, lambda: repl.deno_process.kill())
+        timer.start()
+        try:
+            result = repl.execute(code, variables=dict(input_args))
+        finally:
+            timer.cancel()
+    except (CodeInterpreterError, SyntaxError) as e:
+        if not timer.is_alive() and not timer.cancelled():
+            # Timer fired -- this is a timeout, not a normal error
+            raise REPLTimeoutError(
+                f"Code interpreter timed out after {self.repl_timeout}s"
+            ) from e
+        result = f"[Error] {e}"
+    #+END_SRC
+
+    ~REPLTimeoutError~ is not ~CodeInterpreterError~, so nothing in
+    RLM or our code catches it -- it bubbles up and fails the call.
+
+*** Subtasks
+
+    - [ ] Add ~REPLTimeoutError~ exception class
+    - [ ] Add ~repl_timeout~ param to ~CustomizableRLM.__init__~ (default 300),
+          passable via ~module.kwargs.repl_timeout~ in config YAML
+    - [ ] Add ~threading.Timer~ + ~deno_process.kill()~ to ~_execute_iteration~,
+          re-raise as ~REPLTimeoutError~
+    - [ ] Same for ~_aexecute_iteration~
+    - [ ] Test with ~debugging/debug_rlm.py~ on example 71
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~
