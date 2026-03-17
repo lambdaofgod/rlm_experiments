@@ -131,8 +131,8 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
     """
     cfg = load_config(config_path)
 
-    if not cfg.traces_endpoint or not cfg.traces_project:
-        print("Error: config must have traces_endpoint and traces_project")
+    if not cfg.traces_project:
+        print("Error: config must have traces_project")
         return
 
     # Load score filter if provided

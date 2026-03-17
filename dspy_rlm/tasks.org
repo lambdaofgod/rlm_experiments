@@ -389,6 +389,39 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [ ] Create a test config YAML pointing at a local endpoint
     - [ ] Smoke test with a local vLLM/SGLang server
 
+** TODO Clean up trace-to-dataset matching in ~fetch_predictions~
+
+   ~fetch_predictions~ in ~evaluate.py~ has two problems:
+
+   1. *Legacy fallback code*: after the direct
+      ~question_to_row.get(query)~ lookup, there are two fallback paths
+      that apply ~transform_question~ in various directions (lines
+      335-341).  These were needed when some Phoenix spans predated the
+      parquet being regenerated with ~transform_question~ applied.  All
+      current runs use the already-transformed parquet, so the direct
+      match always succeeds.  The fallback code is dead weight that
+      makes the matching logic look fragile and harder to reason about.
+
+   2. *Conflated error counter*: the ~unmatched~ counter (and the
+      ~Warning: N spans could not be matched~ message) lumps together
+      two different failure modes:
+      - Actual query mismatches (query text not found in parquet)
+      - Output parse failures (~_extract_answer_from_prediction_repr~
+        raises on spans where RLM never called ~SUBMIT~)
+      This is misleading -- the 7 "unmatched" spans in the
+      ~dspy-sft-longbench-qwen4b~ project are all output parse
+      failures, not query mismatches.
+
+*** Subtasks
+
+    - [ ] Remove ~transform_question~ fallback paths from ~fetch_predictions~
+          (keep only the direct ~question_to_row.get(query)~ lookup)
+    - [ ] Remove the ~transformed_to_row~ dict construction
+    - [ ] Remove the ~from data_utils import transform_question~ import
+    - [ ] Split ~unmatched~ into two counters: ~query_mismatches~ and
+          ~parse_failures~, with separate warning messages
+    - [ ] Consider scoring parse failures as 0 instead of dropping them
+
 ** TODO Compare evaluation results across models
 
    Current eval pipeline has survivorship bias: ~fetch_predictions~ drops
@@ -841,6 +874,10 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           are fetched and scored correctly
     - [ ] Test export: run ~export_traces.py~ with ~traces_backend: mlflow~,
           verify JSONL output format matches Phoenix-backed output
+    - [X] Allow ~traces_endpoint~ to be omitted for MLflow (local ~./mlruns~)
+      - ~collect_sft_data.py~: gate ~setup_tracing~ on ~traces_backend~ being set, not just ~traces_endpoint~
+      - ~export_traces.py~: drop ~traces_endpoint~ requirement from the guard (keep ~traces_project~ requirement)
+      - Update ~local_config.yaml~ and ~finetuned_config.yaml~: add ~traces_backend: "mlflow"~, remove ~traces_endpoint~
 
 ** TODO Enable structured output via config flag
 
@@ -1029,6 +1066,19 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           re-raise as ~REPLTimeoutError~
     - [ ] Same for ~_aexecute_iteration~
     - [ ] Test with ~debugging/debug_rlm.py~ on example 71
+
+** DONE Make project importable as a package
+
+   Scripts in subdirectories (e.g. ~debugging/~, ~prompt_optimization/~)
+   cannot import modules from the project root (~config_model~,
+   ~tracing_backend~, etc.) without ~sys.path~ hacks.  Set up the project
+   as an installable package so that all modules are importable from
+   anywhere.
+
+   - [X] Add ~[project.scripts]~ or a ~src/~ layout, or at minimum add a
+         package entry in ~pyproject.toml~ so ~uv pip install -e .~ works
+   - [X] Verify imports work from ~debugging/~ and ~prompt_optimization/~
+         subdirectories without ~sys.path~ manipulation
 
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~

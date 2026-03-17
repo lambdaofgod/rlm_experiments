@@ -159,7 +159,7 @@ def setup_tracing(backend, endpoint, project_name=None):
 def main(config_path="config.yaml"):
     cfg = load_config(config_path)
 
-    if cfg.traces_endpoint:
+    if cfg.traces_backend or cfg.traces_endpoint:
         backend = cfg.traces_backend or "phoenix"
         setup_tracing(backend, cfg.traces_endpoint, project_name=cfg.traces_project)
 
