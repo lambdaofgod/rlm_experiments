@@ -57,6 +57,46 @@ def sample_longbench_pro(input_path="longbench_pro_en.parquet", output_path="sam
         print(f"  {row['token_length']}: {row['id'][:16]}...")
 
 
+def build_question_lookup(dataset_df):
+    """Build lookup tables for matching query text to dataset rows.
+
+    Returns (question_to_row, transformed_to_row) where each maps
+    question text -> DataFrame row.
+    """
+    question_to_row = {}
+    for _, row in dataset_df.iterrows():
+        question_to_row[row["question_nonthinking"]] = row
+
+    transformed_to_row = {}
+    for _, row in dataset_df.iterrows():
+        transformed = transform_question(row["question_nonthinking"])
+        transformed_to_row[transformed] = row
+
+    return question_to_row, transformed_to_row
+
+
+def match_question_to_row(query, question_to_row, transformed_to_row):
+    """Match a query string to a dataset row via question text.
+
+    Tries three strategies:
+    1. Direct match against question_nonthinking
+    2. Transform the query, then match against question_nonthinking
+    3. Match the raw query against pre-transformed questions
+
+    Returns the matched row or None.
+    """
+    matched_row = question_to_row.get(query)
+
+    if matched_row is None:
+        transformed_query = transform_question(query)
+        matched_row = question_to_row.get(transformed_query)
+
+    if matched_row is None:
+        matched_row = transformed_to_row.get(query)
+
+    return matched_row
+
+
 if __name__ == "__main__":
     fire.Fire({
         "longbench_pro": prepare_longbench_pro,

@@ -11,6 +11,7 @@ import fire
 import pandas as pd
 
 from config_model import load_config
+from data_utils import build_question_lookup, match_question_to_row
 from tracing_backend import (
     INPUT_VALUE,
     NAME,
@@ -21,50 +22,6 @@ from tracing_backend import (
     TRACE_ID,
     make_tracing_backend,
 )
-
-
-def _build_dataset_lookup(dataset_path):
-    """Build query-text -> row lookup tables for matching spans to dataset rows."""
-    from data_utils import transform_question
-
-    dataset = pd.read_parquet(dataset_path)
-
-    question_to_row = {}
-    for _, row in dataset.iterrows():
-        question_to_row[row["question_nonthinking"]] = row
-
-    transformed_to_row = {}
-    for _, row in dataset.iterrows():
-        transformed = transform_question(row["question_nonthinking"])
-        transformed_to_row[transformed] = row
-
-    return question_to_row, transformed_to_row
-
-
-def _match_trace_to_id(root_span, question_to_row, transformed_to_row):
-    """Match an RLM.forward root span to a dataset row ID via query text.
-
-    Reuses the same matching logic as fetch_predictions in evaluate.py.
-    Returns (id, question_nonthinking) or (None, None) if no match.
-    """
-    from data_utils import transform_question
-
-    input_data = json.loads(root_span[INPUT_VALUE])
-    query = input_data["input_args"]["query"]
-
-    matched_row = question_to_row.get(query)
-
-    if matched_row is None:
-        transformed_query = transform_question(query)
-        matched_row = question_to_row.get(transformed_query)
-
-    if matched_row is None:
-        matched_row = transformed_to_row.get(query)
-
-    if matched_row is None:
-        return None, None
-
-    return matched_row["id"], matched_row["question_nonthinking"]
 
 
 def _trace_to_training_examples(trace_spans):
@@ -157,7 +114,8 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
     root_spans = root_spans.sort_values(START_TIME).copy()
 
     # Build dataset lookups
-    question_to_row, transformed_to_row = _build_dataset_lookup(cfg.dataset.path)
+    dataset = pd.read_parquet(cfg.dataset.path)
+    question_to_row, transformed_to_row = build_question_lookup(dataset)
 
     # Process each trace
     all_examples = []
@@ -167,7 +125,10 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
     seen_ids = {}  # id -> start_time, for deduplication
 
     for _, root_span in root_spans.iterrows():
-        row_id, _ = _match_trace_to_id(root_span, question_to_row, transformed_to_row)
+        input_data = json.loads(root_span[INPUT_VALUE])
+        query = input_data["input_args"]["query"]
+        matched_row = match_question_to_row(query, question_to_row, transformed_to_row)
+        row_id = matched_row["id"] if matched_row is not None else None
 
         if row_id is None:
             unmatched += 1

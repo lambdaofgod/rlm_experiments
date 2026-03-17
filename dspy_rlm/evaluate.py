@@ -12,6 +12,16 @@ import fire
 import pandas as pd
 
 from config_model import ErrorInfo, ErrorSummary, EvalReport, EvalSummary, GroupStats, ScoredExample, load_config
+from data_utils import build_question_lookup, match_question_to_row
+from tracing_backend import (
+    INPUT_VALUE,
+    NAME,
+    OUTPUT_VALUE,
+    START_TIME,
+    STATUS_CODE,
+    STATUS_MESSAGE,
+    make_tracing_backend,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +264,6 @@ def _extract_answer_from_prediction_repr(output_json_str):
 
 def _collect_error_info(error_spans):
     """Collect ErrorInfo and message counts from non-OK spans."""
-    from tracing_backend import INPUT_VALUE, STATUS_MESSAGE
-
     errors = []
     by_message = defaultdict(int)
 
@@ -286,16 +294,8 @@ def _collect_error_info(error_spans):
 def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10000):
     """Fetch RLM predictions from traces and match to dataset rows.
 
-    HACK: Matching is done by comparing span query text to dataset
-    question_nonthinking. Tries direct match first, then applies
-    transform_question for pre-transform spans. This is fragile and needs
-    a systematic fix (e.g. passing row id through to spans).
-
     Returns (predictions_df, error_summary_or_none).
     """
-    from data_utils import transform_question
-    from tracing_backend import INPUT_VALUE, NAME, OUTPUT_VALUE, START_TIME, STATUS_CODE
-
     spans_df = backend.get_root_spans(project_name, limit=limit)
 
     # Filter to module forward spans
@@ -308,19 +308,9 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
     # Collect error info
     error_summary = _collect_error_info(error_spans) if len(error_spans) > 0 else None
 
-    # Load dataset for matching
+    # Load dataset and build lookup tables
     dataset = pd.read_parquet(dataset_path)
-
-    # Build lookup: question_nonthinking -> row
-    question_to_row = {}
-    for _, row in dataset.iterrows():
-        question_to_row[row["question_nonthinking"]] = row
-
-    # Also build transformed-question lookup for pre-transform spans
-    transformed_to_row = {}
-    for _, row in dataset.iterrows():
-        transformed = transform_question(row["question_nonthinking"])
-        transformed_to_row[transformed] = row
+    question_to_row, transformed_to_row = build_question_lookup(dataset)
 
     results = []
     unmatched = 0
@@ -328,18 +318,7 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
         input_data = json.loads(span[INPUT_VALUE])
         query = input_data["input_args"]["query"]
 
-        # Try direct match first (post-transform spans)
-        matched_row = question_to_row.get(query)
-
-        # Fallback: apply transform_question (pre-transform spans)
-        if matched_row is None:
-            transformed_query = transform_question(query)
-            matched_row = question_to_row.get(transformed_query)
-
-        # Also try matching against the transformed lookup
-        if matched_row is None:
-            matched_row = transformed_to_row.get(query)
-
+        matched_row = match_question_to_row(query, question_to_row, transformed_to_row)
         if matched_row is None:
             unmatched += 1
             continue
@@ -542,8 +521,6 @@ def evaluate(
     """
     error_summary = None
     if config_path:
-        from tracing_backend import make_tracing_backend
-
         cfg = load_config(config_path)
         backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
         df_pred, error_summary = fetch_predictions(backend, cfg.traces_project, cfg.dataset.path, cfg.module.type, limit=limit)
