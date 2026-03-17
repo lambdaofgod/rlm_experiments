@@ -1080,6 +1080,26 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
    - [X] Verify imports work from ~debugging/~ and ~prompt_optimization/~
          subdirectories without ~sys.path~ manipulation
 
+** DONE Replace ~BootstrapFinetune~ with sequential runner
+
+   ~SFTDataCollector(BootstrapFinetune)~ caused ~OSError: [Errno 24]
+   Too many open files~ because BootstrapFinetune's internal parallelism
+   (~Evaluate~ -> ~ParallelExecutor~ -> ~ThreadPoolExecutor~) spawns too
+   many concurrent Deno subprocesses for RLM, exhausting file
+   descriptors.  The JSONL export it produced was never usable on the
+   full dataset anyway -- traces are collected from MLflow/Phoenix
+   instead.
+
+   Replaced with a simple sequential ~for~ loop in ~main()~ that calls
+   ~program(**example.inputs())~ per example, with tqdm progress bar and
+   metric tracking.  MLflow autolog captures all traces automatically.
+
+   - [X] Delete ~SFTDataCollector~ class (55 lines)
+   - [X] Remove ~BootstrapFinetune~ import and all monkey-patching
+   - [X] Replace student/teacher/collector with single program + for loop
+   - [X] Add tqdm progress bar with ok/err/last postfix
+   - [X] Convert all ~print()~ calls to ~logging~ (~logger.info~ / ~logger.warning~)
+
 ** TODO Document ~CustomizableRLM~
    - [ ] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~
