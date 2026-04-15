@@ -342,7 +342,7 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
       - Collect training examples, write JSONL
     - [X] Test on sample project, verify output format
 
-** TODO Support custom OpenAI-compatible API base URL
+** DONE Support custom OpenAI-compatible API base URL
 
    Allow pointing ~dspy.LM~ at any OpenAI-compatible endpoint (vLLM,
    ollama, SGLang, local servers, etc.) via config YAML.  DSPy's ~LM~
@@ -386,8 +386,8 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
     - [X] Add ~api_base~, ~api_key~ to ~LMConfig~ in ~config_model.py~
     - [X] Pass them through to ~dspy.LM()~ in ~collect_sft_data.py~
-    - [ ] Create a test config YAML pointing at a local endpoint
-    - [ ] Smoke test with a local vLLM/SGLang server
+    - [X] Create a test config YAML pointing at a local endpoint
+    - [X] Smoke test with a local vLLM/SGLang server
 
 ** TODO Clean up trace-to-dataset matching in ~fetch_predictions~
 
@@ -422,7 +422,7 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           ~parse_failures~, with separate warning messages
     - [ ] Consider scoring parse failures as 0 instead of dropping them
 
-** TODO Compare evaluation results across models
+** DONE Compare evaluation results across models
 
    Current eval pipeline has survivorship bias: ~fetch_predictions~ drops
    ERROR traces, and ~_score_predictions~ does an inner join -- so failed
@@ -471,15 +471,15 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 *** Subtasks
 
-    - [ ] Create ~compare_evals.py~ with fire CLI
-    - [ ] Implement ~load_eval_results(metrics_json) -> dict[id, ScoredExample]~
-    - [ ] Implement ~build_comparison(results_a, results_b, dataset_df)~
+    - [X] Create ~compare_evals.py~ with fire CLI
+    - [X] Implement ~load_eval_results(metrics_json) -> dict[id, ScoredExample]~
+    - [X] Implement ~build_comparison(results_a, results_b, dataset_df)~
       - Outer join, categorize, compute stats
-    - [ ] Implement adjusted scoring (missing = 0)
-    - [ ] Print comparison summary table
-    - [ ] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
+    - [X] Implement adjusted scoring (missing = 0)
+    - [X] Print comparison summary table
+    - [X] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
 
-** TODO Add configurable per-request timeout for LM calls
+** DONE Add configurable per-request timeout for LM calls
 
    When the LLM server drops a connection mid-request (OOM, crash,
    context overflow), the Python process hangs forever in ~CLOSE_WAIT~
@@ -522,9 +522,9 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 *** Subtasks
 
-    - [ ] Add ~timeout: Optional[int] = None~ to ~LMConfig~
-    - [ ] Pass it through to ~dspy.LM()~ in ~collect_sft_data.py~
-    - [ ] Add ~timeout: 60~ to ~local_config.yaml~
+    - [X] Add ~timeout: Optional[int] = None~ to ~LMConfig~
+    - [X] Pass it through to ~dspy.LM()~ in ~collect_sft_data.py~
+    - [X] Add ~timeout: 60~ to ~local_config.yaml~
 
 ** TODO Categorize failures in eval pipeline
 
@@ -586,7 +586,7 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [ ] Test with ~dspy-sft-longbench-finetuned-qwen4b~ project
           (has 9 ERROR spans to categorize)
 
-** TODO Abstract tracing backend -- decouple from Arize Phoenix
+** DONE Abstract tracing backend -- decouple from Arize Phoenix
 
    Phoenix is currently hardcoded in two roles:
 
@@ -701,14 +701,14 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 *** Subtasks
 
-    - [ ] Define canonical span DataFrame schema
-    - [ ] Create ~tracing_backend.py~ with ~TracingBackend~ ABC
-    - [ ] Implement ~PhoenixBackend~
-    - [ ] Refactor ~evaluate.py~ to use ~TracingBackend~
-    - [ ] Refactor ~export_traces.py~ to use ~TracingBackend~
-    - [ ] Add ~traces_backend~ config field to ~Config~ / ~config_model.py~
-    - [ ] Refactor ~setup_tracing~ into a backend-aware factory
-    - [ ] Test end-to-end with a dedicated test config that uses a
+    - [X] Define canonical span DataFrame schema
+    - [X] Create ~tracing_backend.py~ with ~TracingBackend~ ABC
+    - [X] Implement ~PhoenixBackend~
+    - [X] Refactor ~evaluate.py~ to use ~TracingBackend~
+    - [X] Refactor ~export_traces.py~ to use ~TracingBackend~
+    - [X] Add ~traces_backend~ config field to ~Config~ / ~config_model.py~
+    - [X] Refactor ~setup_tracing~ into a backend-aware factory
+    - [X] Test end-to-end with a dedicated test config that uses a
           fresh Phoenix project name (e.g. ~dspy-test-tracing-refactor~)
           and ~sample_longbench_pro_en.parquet~ (6 examples):
       - Run ~collect_sft_data.py~ -- traces land in the test project
@@ -716,7 +716,7 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
       - Run ~export_traces.py~ -- exports training JSONL
       - Verify all three produce output without errors
 
-** TODO Add MLflow tracing backend
+** DONE Add MLflow tracing backend
 
    Add MLflow as an alternative to Arize Phoenix for both trace writing
    (instrumentation) and trace reading (evaluation/export).  MLflow has
@@ -846,33 +846,33 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 *** Dependencies
 
-    - [ ] ~uv add mlflow~ (includes ~mlflow.client~, ~mlflow.dspy~)
+    - [X] ~uv add mlflow~ (includes ~mlflow.client~, ~mlflow.dspy~)
 
 *** Subtasks
 
-    - [ ] ~uv add mlflow~
-    - [ ] Investigate MLflow span schema for DSPy traces
+    - [X] ~uv add mlflow~
+    - [X] Investigate MLflow span schema for DSPy traces
       - Run a small DSPy program with ~mlflow.dspy.autolog()~
       - Inspect ~span.inputs~ / ~span.outputs~ structure
       - Check if ~input_args.query~ path matches Phoenix format
       - Document any normalization needed in ~_span_to_row~
-    - [ ] Add ~"mlflow"~ branch to ~setup_tracing~ in ~collect_sft_data.py~
-    - [ ] Implement ~MlflowBackend~ in ~tracing_backend.py~
+    - [X] Add ~"mlflow"~ branch to ~setup_tracing~ in ~collect_sft_data.py~
+    - [X] Implement ~MlflowBackend~ in ~tracing_backend.py~
       - ~__init__~: set tracking URI, create MlflowClient
       - ~_get_experiment_id~: look up experiment by name
       - ~_span_to_row~: map MLflow span to canonical dict
       - ~_to_dataframe~: build DataFrame with canonical schema
       - ~get_root_spans~: fetch traces, extract root spans
       - ~get_all_spans~: fetch traces, extract all spans
-    - [ ] Update ~make_tracing_backend~ factory
-    - [ ] Test trace writing: run ~collect_sft_data.py~ with
+    - [X] Update ~make_tracing_backend~ factory
+    - [X] Test trace writing: run ~collect_sft_data.py~ with
           ~traces_backend: mlflow~ on sample dataset, verify traces
           appear in MLflow UI
-    - [ ] Test trace reading: run ~evaluate.py phoenix~ (the subcommand
+    - [X] Test trace reading: run ~evaluate.py phoenix~ (the subcommand
           name is misleading -- it reads from whatever backend is
           configured) with ~traces_backend: mlflow~, verify predictions
           are fetched and scored correctly
-    - [ ] Test export: run ~export_traces.py~ with ~traces_backend: mlflow~,
+    - [X] Test export: run ~export_traces.py~ with ~traces_backend: mlflow~,
           verify JSONL output format matches Phoenix-backed output
     - [X] Allow ~traces_endpoint~ to be omitted for MLflow (local ~./mlruns~)
       - ~collect_sft_data.py~: gate ~setup_tracing~ on ~traces_backend~ being set, not just ~traces_endpoint~
@@ -1012,7 +1012,7 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           in traces / logs
     - [ ] Test with a mock LM that returns reasoning but no code field
 
-** TODO Add hard timeout to ~CustomizableRLM._execute_iteration~
+** DONE Add hard timeout to ~CustomizableRLM._execute_iteration~
 
    The code interpreter (~PythonInterpreter.execute()~) does
    ~while True: readline()~ with no timeout. When the model generates
@@ -1059,13 +1059,122 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 *** Subtasks
 
-    - [ ] Add ~REPLTimeoutError~ exception class
-    - [ ] Add ~repl_timeout~ param to ~CustomizableRLM.__init__~ (default 300),
+    - [X] Add ~REPLTimeoutError~ exception class
+    - [X] Add ~repl_timeout~ param to ~CustomizableRLM.__init__~ (default 300),
           passable via ~module.kwargs.repl_timeout~ in config YAML
-    - [ ] Add ~threading.Timer~ + ~deno_process.kill()~ to ~_execute_iteration~,
+    - [X] Add ~threading.Timer~ + ~deno_process.kill()~ to ~_execute_iteration~,
           re-raise as ~REPLTimeoutError~
-    - [ ] Same for ~_aexecute_iteration~
-    - [ ] Test with ~debugging/debug_rlm.py~ on example 71
+    - [X] Same for ~_aexecute_iteration~
+    - [X] Test with ~debugging/debug_rlm.py~ on example 71
+
+** TODO Fix cascading NameError/TypeError after Deno sandbox crashes mid-run
+
+   When the Deno/Pyodide sandbox process dies partway through an RLM run,
+   every remaining iteration fails in a cascade: ~NameError: name
+   'llm_query' is not defined~, ~NameError: name 'llm_query_batched' is
+   not defined~, and -- for signatures with a named output field --
+   ~TypeError: SUBMIT() got an unexpected keyword argument 'answer'~.  The
+   model keeps retrying ~SUBMIT(answer=...)~ variants until the iteration
+   budget runs out and the whole trace ends in extract-fallback (or
+   max-iter ERROR) despite the model often having the right answer
+   computed in-process before the crash.
+
+   Reproduced in the real trace at
+   ~debugging/failing_trace_qwen3.5_4b.json~ (Phoenix project
+   ~dspy-sft-longbench-qwen4b~, trace id
+   ~bb12a4d1a5b06eb56df4786f2f676024~).  Triggering event: step 6's
+   ~llm_query_batched~ with 50 prompts produced ~[Error] Error: Unhandled
+   async error: PythonError~ (a Pyodide async-FFI failure that killed the
+   Deno subprocess -- same FD/socket exhaustion family as the ~OSError:
+   [Errno 24] Too many open files~ seen at the root of a neighbouring
+   ERROR-status trace).
+
+*** Root cause (upstream, in dspy)
+
+    ~python_interpreter.py~ only resets ~_tools_registered~ /
+    ~_mounted_files~ on the ~BrokenPipeError~ path (line 480-490).  The
+    empty-~readline()~ path at line 495-499 -- which triggers when the
+    subprocess dies *during* execution rather than at the write -- raises
+    ~CodeInterpreterError("No output from Deno subprocess...")~ without
+    resetting the flags.  The next ~execute()~ spawns a fresh Deno via
+    ~_ensure_deno_process~, but ~_register_tools~ short-circuits because
+    the flag is still ~True~.  Only ~PYTHON_SETUP_CODE~'s default
+    single-arg ~SUBMIT(output)~ survives on the new process; tool wrappers
+    and the typed ~SUBMIT(answer)~ from ~makeSubmitWrapper~ are gone.
+
+*** Failing test (already added)
+
+    ~test_customizable_rlm.py::TestInterpreterCrashRecovery::test_typed_submit_survives_deno_process_death~
+    kills the Deno process, runs ~SUBMIT(answer='after')~, and expects
+    ~FinalOutput({"answer": "after"})~.  Currently fails with
+    ~CodeInterpreterError: TypeError: ["SUBMIT() got an unexpected keyword
+    argument 'answer'"]~ -- exact same error string the real trace
+    recorded.  Should pass once Piece 1 below lands.
+
+*** Approach (two pieces, in ~customizable_rlm.py~)
+
+    *Piece 1 -- self-healing registration.* In ~_execute_iteration~ and
+    ~_aexecute_iteration~, unconditionally reset the registration flags on
+    ~repl~ before calling ~repl.execute(...)~:
+
+    #+BEGIN_SRC python
+    if hasattr(repl, "_tools_registered"):
+        repl._tools_registered = False
+    if hasattr(repl, "_mounted_files"):
+        repl._mounted_files = False
+    #+END_SRC
+
+    Cost: one extra JSON-RPC ~register~ round-trip per iteration against
+    an in-process Deno (negligible vs. the LM call).  Benefit: any
+    subprocess restart (BrokenPipe path, dead-readline path, or a future
+    unrelated crash mode) self-heals.
+
+    *Piece 2 -- honest observation when the sandbox crashed.* Catch the
+    ~CodeInterpreterError("No output from Deno subprocess...")~ raised by
+    ~repl.execute~, surface it to the trajectory as:
+
+    #+BEGIN_EXAMPLE
+    [Error] Interpreter process crashed and was restarted.
+    Input variables (context, query, ...) are still available, but any
+    intermediate variables you defined in previous steps have been lost.
+    Re-compute them if needed.
+    #+END_EXAMPLE
+
+    Input variables are re-injected by
+    ~PythonInterpreter._inject_variables~ every ~execute()~ call, so
+    ~context~ / ~query~ / etc. survive restart.  In-REPL state built up by
+    prior iterations (computed Counters, cached analyses, fetched LLM
+    outputs) does NOT survive -- and we deliberately do *not* replay
+    earlier trajectory code, because:
+    - ~llm_query~ / ~llm_query_batched~ cost real money per call
+    - ~_make_llm_tools~ keeps ~state["call_count"]~ on the Python side, so
+      replay could trip ~max_llm_calls~ mid-rebuild
+    - Sampling is non-deterministic; replayed outputs will not match what
+      the original trajectory recorded
+    - User tools may have side effects outside the sandbox
+
+    The model already has the full trajectory in its context and can
+    decide what to recompute against the clean-slate REPL.
+
+*** Subtasks
+
+    - [X] Write failing test (~TestInterpreterCrashRecovery~ in
+          ~test_customizable_rlm.py~, kills ~deno_process~ and asserts
+          typed SUBMIT still works on the next ~execute()~)
+    - [ ] Piece 1: reset ~_tools_registered~ / ~_mounted_files~ before
+          each ~repl.execute~ call in ~_execute_iteration~ and
+          ~_aexecute_iteration~
+    - [ ] Verify the new test passes
+    - [ ] Piece 2: catch ~CodeInterpreterError~ whose message starts with
+          ~"No output from Deno subprocess"~, format a crash-restart
+          observation, append it to REPL history instead of re-raising
+    - [ ] Add a test that simulates the dead-readline path (e.g.
+          monkey-patch ~repl.deno_process.stdout.readline~ to return ~""~
+          once), assert the crash observation lands in history and the
+          next iteration sees input variables restored
+    - [ ] Upstream issue/PR against dspy to reset the flags on the
+          dead-readline path in ~PythonInterpreter.execute~ (makes
+          Piece 1 unnecessary once merged)
 
 ** DONE Make project importable as a package
 
@@ -1100,6 +1209,129 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
    - [X] Add tqdm progress bar with ok/err/last postfix
    - [X] Convert all ~print()~ calls to ~logging~ (~logger.info~ / ~logger.warning~)
 
-** TODO Document ~CustomizableRLM~
-   - [ ] Docstrings on class and ~chars_for_sub_lm~
+** DONE Skip already-traced examples in ~collect_sft_data.py~
+
+   When resuming a long collection run (e.g. after a crash, server restart,
+   or to extend a partial run), every example is re-processed from scratch.
+   RLM calls are expensive (multiple LM iterations + code interpreter per
+   example), so re-running already-successful traces wastes time and money.
+
+   By default, fetch existing traces from the configured backend before
+   the collection loop, identify which examples already have OK traces,
+   and skip them.  ERROR traces should NOT be skipped -- those examples
+   need to be retried.  Add a ~--rerun_all~ flag to disable this behavior
+   and force re-processing of every example.
+
+*** Current flow (~collect_sft_data.py:135-149~)
+
+    #+BEGIN_EXAMPLE
+    for example in pbar:
+        prediction = program(**example.inputs())   # expensive RLM call
+    #+END_EXAMPLE
+
+    No awareness of existing traces.  Every example runs unconditionally.
+
+*** Approach
+
+    1. Before the collection loop, connect to the tracing backend
+       (reuse ~make_tracing_backend~ from ~tracing_backend.py~)
+    2. Fetch root spans via ~get_root_spans(project_name)~
+    3. Filter to ~status_code == "OK"~ and matching module forward name
+       (~f"{module_type}.forward"~)
+    4. Extract ~query~ from each span's ~input_value~ JSON
+       (~json.loads(span[INPUT_VALUE])["input_args"]["query"]~)
+    5. Build a set of already-traced query strings
+    6. In the collection loop, check ~example.query in traced_queries~
+       before calling ~program~; if present, skip and increment a
+       ~skipped~ counter
+
+    Query-text matching is the same approach used by ~fetch_predictions~
+    in ~evaluate.py~.  Since ~load_dataset~ renders the prompt template
+    into the ~query~ field, and trace spans store the same rendered text
+    in ~input_args.query~, direct string equality works.
+
+*** Why match by query text, not by dataset row ID
+
+    ~load_dataset~ does not propagate the parquet ~id~ column into DSPy
+    examples (line 37: only ~prompt_template~ keys + ~answer~).  The
+    examples only have the rendered ~query~ and ~context~ fields.
+    Matching by query text is what ~fetch_predictions~ already does and
+    is reliable for the direct-match case (no ~transform_question~
+    fallbacks needed since both the parquet and traces use the same
+    already-transformed text).
+
+*** Code changes (~collect_sft_data.py~)
+
+    New helper:
+
+    #+BEGIN_SRC python
+    def _fetch_traced_queries(cfg):
+        """Return set of query strings that already have OK traces."""
+        backend = make_tracing_backend(cfg.traces_backend, cfg.traces_endpoint)
+        spans_df = backend.get_root_spans(cfg.traces_project)
+        forward_name = f"{cfg.module.type}.forward"
+        ok_spans = spans_df[
+            (spans_df["name"] == forward_name) & (spans_df["status_code"] == "OK")
+        ]
+        traced = set()
+        for _, span in ok_spans.iterrows():
+            input_data = json.loads(span["input_value"])
+            traced.add(input_data["input_args"]["query"])
+        return traced
+    #+END_SRC
+
+    In ~main()~, add ~rerun_all=False~ parameter.  Before the loop:
+
+    #+BEGIN_SRC python
+    traced_queries = set()
+    if not rerun_all:
+        traced_queries = _fetch_traced_queries(cfg)
+        logger.info("Found %d existing OK traces, will skip", len(traced_queries))
+    #+END_SRC
+
+    In the loop:
+
+    #+BEGIN_SRC python
+    for example in pbar:
+        if example.query in traced_queries:
+            skipped += 1
+            pbar.set_postfix(ok=succeeded, err=failed, skip=skipped, last="SKIP")
+            continue
+        # ... existing try/except ...
+    #+END_SRC
+
+*** Prerequisite: make tracing backend required for collection
+
+    Currently ~collect_sft_data.py:107~ silently skips tracing setup
+    when neither ~traces_backend~ nor ~traces_endpoint~ is set, and
+    falls back to ~"phoenix"~ when only ~traces_endpoint~ is set
+    (~backend = cfg.traces_backend or "phoenix"~).  Both behaviors are
+    confusing and wrong -- running collection without tracing is
+    pointless.  Remove the implicit ~"phoenix"~ default and the
+    conditional; require ~traces_backend~ to be set and error out
+    early if it is missing.
+
+*** Edge cases
+
+    - Empty project: ~get_root_spans~ returns empty DataFrame, so
+      ~traced_queries~ is empty set -- all examples run normally
+    - Duplicate queries in dataset: if two dataset rows have identical
+      ~query~ text, both will be skipped if one was already traced.
+      Acceptable since LongBench-Pro has unique questions.
+    - ~--rerun_all~: bypasses the check entirely, runs every example
+
+*** Subtasks
+
+    - [X] Remove ~if cfg.traces_backend or cfg.traces_endpoint~ guard and
+          ~backend = cfg.traces_backend or "phoenix"~ fallback in ~main()~;
+          require ~traces_backend~ to be set, error out early if missing
+    - [X] Add ~_fetch_traced_queries(cfg) -> set[str]~ in ~collect_sft_data.py~
+    - [X] Add ~rerun_all=False~ parameter to ~main()~
+    - [X] Wire skip check into the collection loop with ~skipped~ counter
+    - [X] Log skip count in the final summary line
+    - [X] Test: run collection on sample dataset, then re-run and verify
+          examples are skipped; re-run with ~--rerun_all~ and verify all run
+
+** DONE Document ~CustomizableRLM~
+   - [X] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~

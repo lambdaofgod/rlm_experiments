@@ -325,7 +325,7 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
 
         try:
             answer = _extract_answer_from_prediction_repr(span[OUTPUT_VALUE])
-        except (json.JSONDecodeError, IndexError, KeyError, ValueError):
+        except (json.JSONDecodeError, IndexError, KeyError, ValueError, TypeError):
             unmatched += 1
             continue
 

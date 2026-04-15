@@ -8,6 +8,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from config_model import load_config
+from tracing_backend import INPUT_VALUE, NAME, STATUS_CODE, make_tracing_backend
 
 logger = logging.getLogger(__name__)
 
@@ -101,12 +102,27 @@ def setup_tracing(backend, endpoint, project_name=None):
     logger.info("OTEL tracing enabled (%s) -> %s (project: %s)", backend, endpoint, project_name)
 
 
-def main(config_path="config.yaml"):
+def _fetch_traced_queries(cfg):
+    """Return set of query strings that already have OK traces."""
+    backend = make_tracing_backend(cfg.traces_backend, cfg.traces_endpoint)
+    spans_df = backend.get_root_spans(cfg.traces_project)
+    forward_name = f"{cfg.module.type}.forward"
+    ok_spans = spans_df[
+        (spans_df[NAME] == forward_name) & (spans_df[STATUS_CODE] == "OK")
+    ]
+    traced = set()
+    for _, span in ok_spans.iterrows():
+        input_data = json.loads(span[INPUT_VALUE])
+        traced.add(input_data["input_args"]["query"])
+    return traced
+
+
+def main(config_path="config.yaml", rerun_all=False):
     cfg = load_config(config_path)
 
-    if cfg.traces_backend or cfg.traces_endpoint:
-        backend = cfg.traces_backend or "phoenix"
-        setup_tracing(backend, cfg.traces_endpoint, project_name=cfg.traces_project)
+    if not cfg.traces_backend:
+        raise ValueError("traces_backend must be configured (e.g. 'mlflow', 'phoenix', 'otel')")
+    setup_tracing(cfg.traces_backend, cfg.traces_endpoint, project_name=cfg.traces_project)
 
     lm_kwargs = {}
     if cfg.lm.api_base:
@@ -132,9 +148,18 @@ def main(config_path="config.yaml"):
     metrics = {"exact_match": exact_match_metric, "always_true": always_true_metric}
     metric = metrics[cfg.collection.metric]
 
-    succeeded, failed = 0, 0
+    traced_queries = set()
+    if not rerun_all:
+        traced_queries = _fetch_traced_queries(cfg)
+        logger.info("Found %d existing OK traces, will skip", len(traced_queries))
+
+    succeeded, failed, skipped = 0, 0, 0
     pbar = tqdm(trainset, desc="Collecting traces")
     for example in pbar:
+        if example.query in traced_queries:
+            skipped += 1
+            pbar.set_postfix(ok=succeeded, err=failed, skip=skipped, last="SKIP")
+            continue
         try:
             prediction = program(**example.inputs())
             score = metric(example, prediction)
@@ -144,9 +169,12 @@ def main(config_path="config.yaml"):
             failed += 1
             status = "ERROR"
             traceback.print_exc()
-        pbar.set_postfix(ok=succeeded, err=failed, last=status)
+        pbar.set_postfix(ok=succeeded, err=failed, skip=skipped, last=status)
 
-    logger.info("Done: %d succeeded, %d failed out of %d", succeeded, failed, len(trainset))
+    logger.info(
+        "Done: %d succeeded, %d failed, %d skipped out of %d",
+        succeeded, failed, skipped, len(trainset),
+    )
 
 
 if __name__ == "__main__":

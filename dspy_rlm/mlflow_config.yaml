@@ -1,5 +1,4 @@
 traces_backend: "mlflow"
-traces_endpoint: "http://localhost:5000"
 traces_project: "dspy-sft-longbench-mlflow"
 
 lm:
