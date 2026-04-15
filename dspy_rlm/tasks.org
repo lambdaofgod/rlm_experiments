@@ -1158,23 +1158,137 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 
 *** Subtasks
 
-    - [X] Write failing test (~TestInterpreterCrashRecovery~ in
-          ~test_customizable_rlm.py~, kills ~deno_process~ and asserts
-          typed SUBMIT still works on the next ~execute()~)
-    - [ ] Piece 1: reset ~_tools_registered~ / ~_mounted_files~ before
-          each ~repl.execute~ call in ~_execute_iteration~ and
-          ~_aexecute_iteration~
-    - [ ] Verify the new test passes
-    - [ ] Piece 2: catch ~CodeInterpreterError~ whose message starts with
-          ~"No output from Deno subprocess"~, format a crash-restart
-          observation, append it to REPL history instead of re-raising
-    - [ ] Add a test that simulates the dead-readline path (e.g.
-          monkey-patch ~repl.deno_process.stdout.readline~ to return ~""~
-          once), assert the crash observation lands in history and the
-          next iteration sees input variables restored
+    - [X] Write crash-recovery test (~TestInterpreterCrashRecovery~ in
+          ~test_customizable_rlm.py~: kills ~deno_process~, applies the
+          Piece 1 reset, asserts typed SUBMIT still works on the next
+          ~execute()~)
+    - [X] Piece 1: ~_force_registration_reset(repl)~ helper in
+          ~customizable_rlm.py~, called before each ~repl.execute~ in
+          both ~_execute_iteration~ and ~_aexecute_iteration~
+    - [X] Verify the three crash-recovery tests pass
+    - [X] Piece 2: ~_format_execute_error(e, input_arg_names)~ helper
+          renders ~"No output from Deno subprocess"~ errors as a
+          crash-restart observation naming the input variables still
+          available; wired into both sync/async iteration exception
+          handlers, routed through the normal ~[Error] ...~ observation
+          path so it lands in REPL history
+    - [X] Unit tests for the crash-observation formatter and the
+          passthrough for other errors
+    - [ ] Stretch: end-to-end test that simulates the dead-readline path
+          inside a real ~execute()~ call (monkey-patch
+          ~repl.deno_process.stdout.readline~ to return ~""~ once), assert
+          the crash observation lands in history and the next iteration
+          sees input variables restored
     - [ ] Upstream issue/PR against dspy to reset the flags on the
           dead-readline path in ~PythonInterpreter.execute~ (makes
           Piece 1 unnecessary once merged)
+
+** DONE Move RLM prompt construction into prompts.py
+
+   ~CustomizableRLM~ builds the action instructions in three places today:
+   upstream's ~ACTION_INSTRUCTIONS_TEMPLATE~, our ~_patch_instructions~
+   (regex substitution of the capacity figure), and ~_inject_tips~
+   (appended tip blocks).  Consolidate this into a single builder function
+   in ~prompts.py~ and delete the post-init signature-mutation logic from
+   ~customizable_rlm.py~.
+
+*** Approach
+
+    Add to ~prompts.py~:
+
+    #+BEGIN_SRC python
+    def build_action_instructions(
+        sub_lm_context_chars: int,
+        *,
+        small_model_tips: bool = False,
+    ) -> str:
+        """Capacity-figure-substituted action template, optionally with
+        small-model tips appended."""
+        ...
+    #+END_SRC
+
+    The function does the ~~500K char capacity~ substitution and, when
+    ~small_model_tips=True~, appends the two tip blocks (context-length
+    warning at <=100k chars, batching block at <=200k chars).
+    ~CustomizableRLM._build_signatures~ (the override added in the field-
+    description fix task below) calls this builder once and passes the
+    result straight to ~dspy.Signature~ -- no post-init mutation.
+
+*** Subtasks
+
+    - [X] Add ~build_action_instructions~ in ~prompts.py~ (single
+          ~.format()~ call; capacity figure and tips block wired in via
+          ~{capacity_chars_k}~ and ~{small_model_tips_block}~ placeholders
+          on the local copy of the template -- no post-hoc substitution)
+    - [X] Move the capacity-figure substitution logic into it
+    - [X] Move both tip blocks into ~prompts.CONTEXT_LENGTH_TIP~ and
+          ~prompts.BATCHING_TIP~ constants
+    - [X] Delete ~_patch_instructions~, ~_inject_tips~, and the
+          ~self._patch_instructions()~ call from ~customizable_rlm.py~;
+          replaced by an override of ~_build_signatures~ that calls
+          ~build_action_instructions~
+    - [X] Repoint ~TestPromptPatching~ tests in
+          ~test_customizable_rlm.py~ at ~build_action_instructions~
+          directly (no full ~CustomizableRLM~ construction)
+    - [X] All 15 tests in ~test_customizable_rlm.py~ pass
+
+** TODO Fix RLM code field description nudging small models to skip the [[ ## code ## ]] marker
+
+   Upstream ~RLM._build_signatures~ (~dspy/predict/rlm.py:290~) declares the
+   ~code~ output field with description ~"Python code to execute. Use markdown
+   code block format: \`\`\`python\\n<code>\\n\`\`\`"~.  ChatAdapter renders
+   that sentence inside the field's marker block in the system prompt, so the
+   LM reads "use markdown code block format" as the instruction for how to
+   delimit the ~code~ field.  Small models (Qwen3.5-4B observed) substitute
+   the markdown fence *instead of* the ~[[ ## code ## ]]~ marker rather than
+   wrapping the code *in addition to* it.  The ChatAdapter parser only
+   recognises the bare marker (regex at ~chat_adapter.py:21~), so it never
+   finds the ~code~ field, parses only ~reasoning~, and raises
+   ~AdapterParseError~ -- the cascade pattern documented in
+   [[file:debugging.org][debugging.org]] (40 of 43 root-OK-descendants-ERROR
+   traces in ~dspy-sft-longbench-qwen4b~).
+
+*** Why the existing knobs cannot fix this
+
+    - ~_patch_instructions~ in ~customizable_rlm.py~ only mutates
+      ~signature.instructions~ (the body of ~ACTION_INSTRUCTIONS_TEMPLATE~).
+      It does not touch per-field descriptions.
+    - ~_inject_tips~ appends to the instruction body, same story.
+    - Markdown fences are *never required* by the parser; they are
+      tolerated and stripped post-parse by ~_strip_code_fences~.  The
+      problematic instruction is purely cosmetic but actively misleading.
+
+*** Approach
+
+    Override ~_build_signatures~ in ~CustomizableRLM~ to construct both
+    signatures locally instead of inheriting them from upstream.  The body
+    is a near-verbatim copy of upstream's method (lines ~263-311 of the
+    venv ~rlm.py~), with two changes:
+
+    1. Use ~prompts.ACTION_INSTRUCTIONS_TEMPLATE~ (the local copy, already
+       created in ~prompts.py~) as the instruction template source instead
+       of upstream's ~ACTION_INSTRUCTIONS_TEMPLATE~.
+    2. Replace the ~code~ ~OutputField~ description with one that does NOT
+       mention markdown fences and explicitly names the marker convention,
+       e.g.
+
+       #+BEGIN_EXAMPLE
+       Python code to execute.  Output it directly after the
+       [[ ## code ## ]] marker; markdown code fences (```python ... ```)
+       are optional and will be stripped.
+       #+END_EXAMPLE
+
+    With this in place, ~_patch_instructions~ becomes a single regex
+    substitution + optional ~_inject_tips~ on a string we already own --
+    no post-construction signature mutation needed.
+
+*** Subtasks
+
+    - [ ] Override ~_build_signatures~ in ~CustomizableRLM~ (uses
+          ~build_action_instructions~ from the prompt-construction refactor
+          task above for the instruction body)
+    - [ ] Replace the ~code~ ~OutputField~ description as above; keep all
+          other field descriptions and the ~extract~ signature unchanged
 
 ** DONE Make project importable as a package
 
