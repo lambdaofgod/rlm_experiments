@@ -1114,11 +1114,10 @@ subgroup spans both prevention (stop the error at its source, usually
 via prompt/tool design) and recovery (handle it cleanly when it
 happens).
 
-** LM call failures
+** Sub-LM unresponsiveness
 
-Anything that goes wrong when talking to an LM endpoint (main LM or
-sub-LM via ~llm_query~): network/connection hangs, type-mismatched
-arguments, context-window overflow.
+Network or server hangs while talking to an LM endpoint: the request
+issues but never returns within a sensible window, blocking the run.
 
 *** DONE Add configurable per-request timeout for LM calls
 
@@ -1166,6 +1165,12 @@ arguments, context-window overflow.
     - [X] Add ~timeout: Optional[int] = None~ to ~LMConfig~
     - [X] Pass it through to ~dspy.LM()~ in ~collect_sft_data.py~
     - [X] Add ~timeout: 60~ to ~local_config.yaml~
+
+** Tool argument misuse
+
+The model passes the wrong shape to a built-in tool (e.g. a dict where
+~llm_query~ expects a string) and the failure surfaces three layers
+deep at the LM endpoint instead of as an actionable REPL observation.
 
 *** DONE Fix llm_query/llm_query_batched docs hiding argument types and call constraints from the LM
 
@@ -1246,6 +1251,12 @@ arguments, context-window overflow.
     - [X] Update ~ACTION_INSTRUCTIONS_TEMPLATE~ in ~prompts.py~ to use
           typed signatures and explicitly state the string-only
           requirement for ~llm_query~ / ~llm_query_batched~
+
+** Sub-LM context overflow
+
+The model packs a single ~llm_query~ prompt past the sub-LM context
+window; the request fails with a hard token-limit error from the
+backend.  Prevention lives at prompt-construction time, not retry.
 
 *** TODO Add count_tokens tool and surface sub-LM token budget in llm_query guidance
 
