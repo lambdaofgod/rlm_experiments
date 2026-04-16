@@ -479,53 +479,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [X] Print comparison summary table
     - [X] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
 
-** DONE Add configurable per-request timeout for LM calls
-
-   When the LLM server drops a connection mid-request (OOM, crash,
-   context overflow), the Python process hangs forever in ~CLOSE_WAIT~
-   because litellm/httpx has no timeout configured.  Observed with
-   finetuned Qwen3.5-4B on llama.cpp -- process hung at example 36
-   with a dead socket.
-
-   Add an optional ~timeout~ field to ~LMConfig~ so that each config
-   can set a per-request timeout appropriate for the model.  Small
-   local models need short timeouts (60s); large API models may need
-   longer or no timeout at all.
-
-*** Config changes (~config_model.py~)
-
-    Add to ~LMConfig~:
-    - ~timeout: Optional[int] = None~ -- per-request timeout in seconds
-
-*** Code changes (~collect_sft_data.py~)
-
-    In ~main()~, pass ~timeout~ to ~dspy.LM()~ when set:
-
-    #+BEGIN_SRC python
-    if cfg.lm.timeout:
-        lm_kwargs["timeout"] = cfg.lm.timeout
-    #+END_SRC
-
-    litellm accepts ~timeout~ as a kwarg and passes it to the HTTP
-    client.  When the timeout fires, litellm raises a timeout error
-    which DSPy's ~Evaluate~ counts as a failed example (increments
-    error counter) and moves on.
-
-*** Example config
-
-    #+BEGIN_EXAMPLE
-    lm:
-      model: "openai/Qwen3.5-4B.Q8_0.gguf"
-      api_base: "http://192.168.1.91:8080/v1"
-      timeout: 60
-    #+END_EXAMPLE
-
-*** Subtasks
-
-    - [X] Add ~timeout: Optional[int] = None~ to ~LMConfig~
-    - [X] Pass it through to ~dspy.LM()~ in ~collect_sft_data.py~
-    - [X] Add ~timeout: 60~ to ~local_config.yaml~
-
 ** TODO Categorize failures in eval pipeline
 
    Currently ~fetch_predictions~ discards all ERROR traces and the
@@ -945,244 +898,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [ ] Verify ~ChainOfThought~ works with structured output
     - [ ] Document provider prefix implications in config examples
 
-** DONE Catch ~AdapterParseError~ instead of falling back to ~JSONAdapter~
-
-   When ~ChatAdapter~ parses the LM response for ~generate_action~ and
-   finds ~reasoning~ but no ~[[ ## code ## ]]~ section, it raises
-   ~AdapterParseError~.  ~ChatAdapter.__call__~ (chat_adapter.py:74)
-   catches *all* exceptions and retries with a fresh ~JSONAdapter()~,
-   which makes a second LM call with heavier JSON-formatted prompting.
-   This compounds across iterations and inflates RLM wall-clock time.
-
-   Fix: catch ~AdapterParseError~ around the ~self.generate_action(...)~
-   call in an overridden ~_execute_iteration~ (and ~_aexecute_iteration~)
-   in ~CustomizableRLM~.  When caught, return a ~Prediction~-like object
-   with the partially parsed ~reasoning~ (available via
-   ~error.parsed_result~) and ~code=""~.  The empty code will produce a
-   no-op REPL output and the next iteration gets feedback to include the
-   code field.
-
-*** Why not make ~code~ optional
-
-    The ~code~ field is defined at rlm.py:290 as
-    ~dspy.OutputField(..., type_=str)~.  Changing it to ~Optional[str]~
-    would live in the upstream dspy package, and
-    ~RLM._process_execution_result~ (line 475) calls
-    ~_strip_code_fences(pred.code)~ which would blow up on ~None~.
-    Catching the error downstream in ~CustomizableRLM~ avoids touching
-    upstream code.
-
-*** Approach
-
-    1. Override ~_execute_iteration~ in ~CustomizableRLM~
-    2. Wrap ~self.generate_action(...)~ in a ~try/except AdapterParseError~
-    3. On catch: build a stub prediction with ~reasoning~ from
-       ~error.parsed_result.get("reasoning", "")~ and ~code=""~
-    4. Let the existing flow handle it -- ~_strip_code_fences("")~ returns
-       ~""~, ~repl.execute("")~ produces no output, iteration continues
-    5. Optionally: disable the fallback entirely by using
-       ~dspy.settings.context(adapter=ChatAdapter(use_json_adapter_fallback=False))~
-       around the call, so the ~AdapterParseError~ propagates immediately
-       instead of being swallowed by the fallback path first
-
-*** Key locations
-
-    - ~AdapterParseError~: ~dspy/utils/exceptions.py~
-      - Has ~parsed_result: dict | None~ with successfully parsed fields
-    - ~ChatAdapter.__call__~: ~dspy/adapters/chat_adapter.py:64-86~
-      - Catches all exceptions, falls back to ~JSONAdapter()~
-      - ~use_json_adapter_fallback~ flag controls this (default ~True~)
-    - ~ChatAdapter.parse~: ~dspy/adapters/chat_adapter.py:239-244~
-      - Raises ~AdapterParseError(parsed_result=fields)~ when fields
-        are incomplete
-    - ~Predict.forward~: ~dspy/predict/predict.py:191~
-      - Uses ~settings.adapter or ChatAdapter()~
-      - Can be overridden per-call via ~dspy.settings.context(adapter=...)~
-    - ~RLM._execute_iteration~: ~dspy/predict/rlm.py:506-534~
-      - Calls ~self.generate_action(...)~ then ~repl.execute(code)~
-    - ~RLM._aexecute_iteration~: ~dspy/predict/rlm.py:593-621~
-      - Async version, same structure
-
-*** Subtasks
-
-    - [ ] Override ~_execute_iteration~ in ~CustomizableRLM~
-    - [ ] Override ~_aexecute_iteration~ in ~CustomizableRLM~
-    - [ ] Verify ~repl.execute("")~ is a safe no-op (or handle gracefully)
-    - [ ] Add a ~logger.warning~ when the fallback triggers so it shows
-          in traces / logs
-    - [ ] Test with a mock LM that returns reasoning but no code field
-
-** DONE Add hard timeout to ~CustomizableRLM._execute_iteration~
-
-   The code interpreter (~PythonInterpreter.execute()~) does
-   ~while True: readline()~ with no timeout. When the model generates
-   expensive code (e.g. char-by-char JSON parsing of 144k chars in
-   Pyodide/WASM), it blocks forever. See [[file:debugging.org][debugging.org]], example 71.
-
-   When this happens the whole RLM call should fail immediately --
-   retrying another iteration makes zero sense if the interpreter
-   got stuck.
-
-*** Approach
-
-    ~threading.Timer~ kills the Deno subprocess after ~repl_timeout~
-    seconds. The ~CodeInterpreterError~ that ~execute()~ raises is
-    caught and re-raised as ~REPLTimeoutError~ (a new exception that
-    nothing else catches), so it propagates straight out of ~forward()~.
-
-    #+BEGIN_SRC python
-    import threading
-
-    class REPLTimeoutError(Exception):
-        """Raised when the code interpreter exceeds repl_timeout."""
-
-    # In _execute_iteration, wrap repl.execute:
-    try:
-        code = _strip_code_fences(action.code)
-        timer = threading.Timer(self.repl_timeout, lambda: repl.deno_process.kill())
-        timer.start()
-        try:
-            result = repl.execute(code, variables=dict(input_args))
-        finally:
-            timer.cancel()
-    except (CodeInterpreterError, SyntaxError) as e:
-        if not timer.is_alive() and not timer.cancelled():
-            # Timer fired -- this is a timeout, not a normal error
-            raise REPLTimeoutError(
-                f"Code interpreter timed out after {self.repl_timeout}s"
-            ) from e
-        result = f"[Error] {e}"
-    #+END_SRC
-
-    ~REPLTimeoutError~ is not ~CodeInterpreterError~, so nothing in
-    RLM or our code catches it -- it bubbles up and fails the call.
-
-*** Subtasks
-
-    - [X] Add ~REPLTimeoutError~ exception class
-    - [X] Add ~repl_timeout~ param to ~CustomizableRLM.__init__~ (default 300),
-          passable via ~module.kwargs.repl_timeout~ in config YAML
-    - [X] Add ~threading.Timer~ + ~deno_process.kill()~ to ~_execute_iteration~,
-          re-raise as ~REPLTimeoutError~
-    - [X] Same for ~_aexecute_iteration~
-    - [X] Test with ~debugging/debug_rlm.py~ on example 71
-
-** TODO Fix cascading NameError/TypeError after Deno sandbox crashes mid-run
-
-   When the Deno/Pyodide sandbox process dies partway through an RLM run,
-   every remaining iteration fails in a cascade: ~NameError: name
-   'llm_query' is not defined~, ~NameError: name 'llm_query_batched' is
-   not defined~, and -- for signatures with a named output field --
-   ~TypeError: SUBMIT() got an unexpected keyword argument 'answer'~.  The
-   model keeps retrying ~SUBMIT(answer=...)~ variants until the iteration
-   budget runs out and the whole trace ends in extract-fallback (or
-   max-iter ERROR) despite the model often having the right answer
-   computed in-process before the crash.
-
-   Reproduced in the real trace at
-   ~debugging/failing_trace_qwen3.5_4b.json~ (Phoenix project
-   ~dspy-sft-longbench-qwen4b~, trace id
-   ~bb12a4d1a5b06eb56df4786f2f676024~).  Triggering event: step 6's
-   ~llm_query_batched~ with 50 prompts produced ~[Error] Error: Unhandled
-   async error: PythonError~ (a Pyodide async-FFI failure that killed the
-   Deno subprocess -- same FD/socket exhaustion family as the ~OSError:
-   [Errno 24] Too many open files~ seen at the root of a neighbouring
-   ERROR-status trace).
-
-*** Root cause (upstream, in dspy)
-
-    ~python_interpreter.py~ only resets ~_tools_registered~ /
-    ~_mounted_files~ on the ~BrokenPipeError~ path (line 480-490).  The
-    empty-~readline()~ path at line 495-499 -- which triggers when the
-    subprocess dies *during* execution rather than at the write -- raises
-    ~CodeInterpreterError("No output from Deno subprocess...")~ without
-    resetting the flags.  The next ~execute()~ spawns a fresh Deno via
-    ~_ensure_deno_process~, but ~_register_tools~ short-circuits because
-    the flag is still ~True~.  Only ~PYTHON_SETUP_CODE~'s default
-    single-arg ~SUBMIT(output)~ survives on the new process; tool wrappers
-    and the typed ~SUBMIT(answer)~ from ~makeSubmitWrapper~ are gone.
-
-*** Failing test (already added)
-
-    ~test_customizable_rlm.py::TestInterpreterCrashRecovery::test_typed_submit_survives_deno_process_death~
-    kills the Deno process, runs ~SUBMIT(answer='after')~, and expects
-    ~FinalOutput({"answer": "after"})~.  Currently fails with
-    ~CodeInterpreterError: TypeError: ["SUBMIT() got an unexpected keyword
-    argument 'answer'"]~ -- exact same error string the real trace
-    recorded.  Should pass once Piece 1 below lands.
-
-*** Approach (two pieces, in ~customizable_rlm.py~)
-
-    *Piece 1 -- self-healing registration.* In ~_execute_iteration~ and
-    ~_aexecute_iteration~, unconditionally reset the registration flags on
-    ~repl~ before calling ~repl.execute(...)~:
-
-    #+BEGIN_SRC python
-    if hasattr(repl, "_tools_registered"):
-        repl._tools_registered = False
-    if hasattr(repl, "_mounted_files"):
-        repl._mounted_files = False
-    #+END_SRC
-
-    Cost: one extra JSON-RPC ~register~ round-trip per iteration against
-    an in-process Deno (negligible vs. the LM call).  Benefit: any
-    subprocess restart (BrokenPipe path, dead-readline path, or a future
-    unrelated crash mode) self-heals.
-
-    *Piece 2 -- honest observation when the sandbox crashed.* Catch the
-    ~CodeInterpreterError("No output from Deno subprocess...")~ raised by
-    ~repl.execute~, surface it to the trajectory as:
-
-    #+BEGIN_EXAMPLE
-    [Error] Interpreter process crashed and was restarted.
-    Input variables (context, query, ...) are still available, but any
-    intermediate variables you defined in previous steps have been lost.
-    Re-compute them if needed.
-    #+END_EXAMPLE
-
-    Input variables are re-injected by
-    ~PythonInterpreter._inject_variables~ every ~execute()~ call, so
-    ~context~ / ~query~ / etc. survive restart.  In-REPL state built up by
-    prior iterations (computed Counters, cached analyses, fetched LLM
-    outputs) does NOT survive -- and we deliberately do *not* replay
-    earlier trajectory code, because:
-    - ~llm_query~ / ~llm_query_batched~ cost real money per call
-    - ~_make_llm_tools~ keeps ~state["call_count"]~ on the Python side, so
-      replay could trip ~max_llm_calls~ mid-rebuild
-    - Sampling is non-deterministic; replayed outputs will not match what
-      the original trajectory recorded
-    - User tools may have side effects outside the sandbox
-
-    The model already has the full trajectory in its context and can
-    decide what to recompute against the clean-slate REPL.
-
-*** Subtasks
-
-    - [X] Write crash-recovery test (~TestInterpreterCrashRecovery~ in
-          ~test_customizable_rlm.py~: kills ~deno_process~, applies the
-          Piece 1 reset, asserts typed SUBMIT still works on the next
-          ~execute()~)
-    - [X] Piece 1: ~_force_registration_reset(repl)~ helper in
-          ~customizable_rlm.py~, called before each ~repl.execute~ in
-          both ~_execute_iteration~ and ~_aexecute_iteration~
-    - [X] Verify the three crash-recovery tests pass
-    - [X] Piece 2: ~_format_execute_error(e, input_arg_names)~ helper
-          renders ~"No output from Deno subprocess"~ errors as a
-          crash-restart observation naming the input variables still
-          available; wired into both sync/async iteration exception
-          handlers, routed through the normal ~[Error] ...~ observation
-          path so it lands in REPL history
-    - [X] Unit tests for the crash-observation formatter and the
-          passthrough for other errors
-    - [ ] Stretch: end-to-end test that simulates the dead-readline path
-          inside a real ~execute()~ call (monkey-patch
-          ~repl.deno_process.stdout.readline~ to return ~""~ once), assert
-          the crash observation lands in history and the next iteration
-          sees input variables restored
-    - [ ] Upstream issue/PR against dspy to reset the flags on the
-          dead-readline path in ~PythonInterpreter.execute~ (makes
-          Piece 1 unnecessary once merged)
-
 ** DONE Move RLM prompt construction into prompts.py
 
    ~CustomizableRLM~ builds the action instructions in three places today:
@@ -1231,64 +946,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           ~test_customizable_rlm.py~ at ~build_action_instructions~
           directly (no full ~CustomizableRLM~ construction)
     - [X] All 15 tests in ~test_customizable_rlm.py~ pass
-
-** TODO Fix RLM code field description nudging small models to skip the [[ ## code ## ]] marker
-
-   Upstream ~RLM._build_signatures~ (~dspy/predict/rlm.py:290~) declares the
-   ~code~ output field with description ~"Python code to execute. Use markdown
-   code block format: \`\`\`python\\n<code>\\n\`\`\`"~.  ChatAdapter renders
-   that sentence inside the field's marker block in the system prompt, so the
-   LM reads "use markdown code block format" as the instruction for how to
-   delimit the ~code~ field.  Small models (Qwen3.5-4B observed) substitute
-   the markdown fence *instead of* the ~[[ ## code ## ]]~ marker rather than
-   wrapping the code *in addition to* it.  The ChatAdapter parser only
-   recognises the bare marker (regex at ~chat_adapter.py:21~), so it never
-   finds the ~code~ field, parses only ~reasoning~, and raises
-   ~AdapterParseError~ -- the cascade pattern documented in
-   [[file:debugging.org][debugging.org]] (40 of 43 root-OK-descendants-ERROR
-   traces in ~dspy-sft-longbench-qwen4b~).
-
-*** Why the existing knobs cannot fix this
-
-    - ~_patch_instructions~ in ~customizable_rlm.py~ only mutates
-      ~signature.instructions~ (the body of ~ACTION_INSTRUCTIONS_TEMPLATE~).
-      It does not touch per-field descriptions.
-    - ~_inject_tips~ appends to the instruction body, same story.
-    - Markdown fences are *never required* by the parser; they are
-      tolerated and stripped post-parse by ~_strip_code_fences~.  The
-      problematic instruction is purely cosmetic but actively misleading.
-
-*** Approach
-
-    Override ~_build_signatures~ in ~CustomizableRLM~ to construct both
-    signatures locally instead of inheriting them from upstream.  The body
-    is a near-verbatim copy of upstream's method (lines ~263-311 of the
-    venv ~rlm.py~), with two changes:
-
-    1. Use ~prompts.ACTION_INSTRUCTIONS_TEMPLATE~ (the local copy, already
-       created in ~prompts.py~) as the instruction template source instead
-       of upstream's ~ACTION_INSTRUCTIONS_TEMPLATE~.
-    2. Replace the ~code~ ~OutputField~ description with one that does NOT
-       mention markdown fences and explicitly names the marker convention,
-       e.g.
-
-       #+BEGIN_EXAMPLE
-       Python code to execute.  Output it directly after the
-       [[ ## code ## ]] marker; markdown code fences (```python ... ```)
-       are optional and will be stripped.
-       #+END_EXAMPLE
-
-    With this in place, ~_patch_instructions~ becomes a single regex
-    substitution + optional ~_inject_tips~ on a string we already own --
-    no post-construction signature mutation needed.
-
-*** Subtasks
-
-    - [ ] Override ~_build_signatures~ in ~CustomizableRLM~ (uses
-          ~build_action_instructions~ from the prompt-construction refactor
-          task above for the instruction body)
-    - [ ] Replace the ~code~ ~OutputField~ description as above; keep all
-          other field descriptions and the ~extract~ signature unchanged
 
 ** DONE Make project importable as a package
 
@@ -1449,3 +1106,527 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
 ** DONE Document ~CustomizableRLM~
    - [X] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~
+
+* RLM error handling
+
+Tasks grouped by where the error originates in the RLM stack.  Each
+subgroup spans both prevention (stop the error at its source, usually
+via prompt/tool design) and recovery (handle it cleanly when it
+happens).
+
+** LM call failures
+
+Anything that goes wrong when talking to an LM endpoint (main LM or
+sub-LM via ~llm_query~): network/connection hangs, type-mismatched
+arguments, context-window overflow.
+
+*** DONE Add configurable per-request timeout for LM calls
+
+   When the LLM server drops a connection mid-request (OOM, crash,
+   context overflow), the Python process hangs forever in ~CLOSE_WAIT~
+   because litellm/httpx has no timeout configured.  Observed with
+   finetuned Qwen3.5-4B on llama.cpp -- process hung at example 36
+   with a dead socket.
+
+   Add an optional ~timeout~ field to ~LMConfig~ so that each config
+   can set a per-request timeout appropriate for the model.  Small
+   local models need short timeouts (60s); large API models may need
+   longer or no timeout at all.
+
+**** Config changes (~config_model.py~)
+
+    Add to ~LMConfig~:
+    - ~timeout: Optional[int] = None~ -- per-request timeout in seconds
+
+**** Code changes (~collect_sft_data.py~)
+
+    In ~main()~, pass ~timeout~ to ~dspy.LM()~ when set:
+
+    #+BEGIN_SRC python
+    if cfg.lm.timeout:
+        lm_kwargs["timeout"] = cfg.lm.timeout
+    #+END_SRC
+
+    litellm accepts ~timeout~ as a kwarg and passes it to the HTTP
+    client.  When the timeout fires, litellm raises a timeout error
+    which DSPy's ~Evaluate~ counts as a failed example (increments
+    error counter) and moves on.
+
+**** Example config
+
+    #+BEGIN_EXAMPLE
+    lm:
+      model: "openai/Qwen3.5-4B.Q8_0.gguf"
+      api_base: "http://192.168.1.91:8080/v1"
+      timeout: 60
+    #+END_EXAMPLE
+
+**** Subtasks
+
+    - [X] Add ~timeout: Optional[int] = None~ to ~LMConfig~
+    - [X] Pass it through to ~dspy.LM()~ in ~collect_sft_data.py~
+    - [X] Add ~timeout: 60~ to ~local_config.yaml~
+
+*** DONE Fix llm_query/llm_query_batched docs hiding argument types and call constraints from the LM
+
+   After the sandbox-crash + code-field fixes, the largest residual bucket
+   in the rerun projects is model-side misuse of the built-in sub-LM
+   tools, not infrastructure (see the "Rerun results..." section in
+   [[file:debugging.org][debugging.org]]):
+
+   - 50 ~BadRequestError: 'content' must be a string~ spans (Group 1 rerun)
+     -- the model called ~llm_query(some_dict)~ and the dict flowed
+     unchallenged through ~_query_lm~ -> ~target_lm~ -> litellm ->
+     llama.cpp, which rejected ~messages[0].content~ as a non-string.
+   - 5 ~BadRequestError: request (N tokens) exceeds context size~ spans
+     (Group 2 rerun) -- the model packed a single ~llm_query~ prompt
+     past the sub-LM context window.
+
+   The root cause in *docs*: the only thing the LM is told about
+   ~llm_query~ / ~llm_query_batched~ is the two-line blurb hardcoded in
+   [[file:prompts.py::13][prompts.py:13-14]]:
+
+   #+BEGIN_EXAMPLE
+   - `llm_query(prompt)` - query a sub-LLM (~{capacity_chars_k}K char capacity) for semantic analysis
+   - `llm_query_batched(prompts)` - query multiple prompts concurrently (much faster for multiple queries)
+   #+END_EXAMPLE
+
+   No argument types, no return type, no statement that ~prompt~ must
+   be ~str~ (nor that ~prompts~ must be ~list[str]~), no mention of the
+   sub-LM's hard token window.  Upstream ~_format_tool_docs~ in
+   [[file:../.venv/lib/python3.12/site-packages/dspy/predict/rlm.py::180][rlm.py:180]] renders typed signatures for *user-provided* tools, but
+   the built-in pair at [[file:../.venv/lib/python3.12/site-packages/dspy/predict/rlm.py::228][rlm.py:228,235]] is baked into the template as
+   literal text -- the ~prompt: str~ type hint on
+   ~def llm_query(prompt: str) -> str~ never reaches the LM.
+
+**** Root cause in the host-side function
+
+    [[file:../.venv/lib/python3.12/site-packages/dspy/predict/rlm.py::228][~_make_llm_tools.llm_query~]] only validates ~if not prompt~
+    (rejects empty).  A dict satisfies truthiness and passes to
+    ~_query_lm~ -> ~target_lm(prompt=<dict>)~ -> litellm packs
+    ~messages=[{"role":"user","content":<dict>}]~ -> llama.cpp's OAI
+    shim fails with ~'content' must be a string~.  The LM only learns
+    "something went wrong server-side", not "you passed the wrong type".
+
+**** Approach
+
+    Spell out the signatures and the string-only constraint in
+    [[file:prompts.py::8][~ACTION_INSTRUCTIONS_TEMPLATE~]].  Replace the two blurb lines
+    with typed signatures and an explicit constraint, e.g.
+
+    #+BEGIN_EXAMPLE
+    - `llm_query(prompt: str) -> str` - query a sub-LLM
+      (~{capacity_chars_k}K char capacity) for semantic analysis.
+      `prompt` MUST be a plain string; serialize dicts/lists with
+      `json.dumps` before passing.
+    - `llm_query_batched(prompts: list[str]) -> list[str]` - query
+      multiple prompts concurrently.  Every element of `prompts`
+      MUST be a plain string.
+    #+END_EXAMPLE
+
+    Keeping this task docs-only for now: if the signatures are in the
+    prompt, the model should rarely pass a dict.  If the misuse
+    pattern persists in the next rerun, revisit and add a host-side
+    type guard (note below).
+
+**** Future extension (only if docs fix is insufficient)
+
+    A host-side type guard via an override of ~_make_llm_tools~ in
+    ~CustomizableRLM~ could wrap upstream's ~llm_query~ /
+    ~llm_query_batched~ and raise ~TypeError~ on non-str input.  The
+    existing ~[Error] <exc>~ observation path would surface it to
+    the LM as a clean REPL observation (same channel as
+    ~CodeInterpreterError~ / ~SyntaxError~), replacing the opaque
+    ~BadRequestError: 'content' must be a string~ that the LM sees
+    today from llama.cpp three layers down.  Defer until we confirm
+    the docs fix alone is not enough.
+
+**** Subtasks
+
+    - [X] Update ~ACTION_INSTRUCTIONS_TEMPLATE~ in ~prompts.py~ to use
+          typed signatures and explicitly state the string-only
+          requirement for ~llm_query~ / ~llm_query_batched~
+
+*** TODO Add count_tokens tool and surface sub-LM token budget in llm_query guidance
+
+   The remaining ~BadRequestError~ overflows in the rerun (5 spans in
+   Group 2, same family as the 3 overflows in the original
+   ~dspy-sft-longbench-qwen4b~ survey) happen because the advertised
+   "~{capacity_chars_k}K char capacity" figure in ~ACTION_INSTRUCTIONS_TEMPLATE~
+   is a soft char heuristic, not a validated token count.  Small
+   models pack prompts ~24 tokens past the sub-LM window and discover
+   the real limit only when llama.cpp rejects the request.
+
+   Plan: expose a ~count_tokens(text: str) -> int~ tool that hits the
+   sub-LM server's tokenizer endpoint, surface the hard token budget in
+   the action template, and nudge the LM to validate prompt size
+   before each ~llm_query~.
+
+**** Open questions (plan before implementing)
+
+    - *Endpoint portability*: llama.cpp and vLLM expose ~POST /tokenize~
+      against the served model, but this is NOT an OpenAI-compatible
+      API -- OpenAI itself has no public tokenize endpoint.  Decide:
+      (a) require the backend to support ~/tokenize~ and document it,
+      (b) fall back to tiktoken / transformers tokenizer when the
+      endpoint is unavailable, (c) make the tool optional and config-
+      gated.
+    - *Budget injection*: the template already has
+      ~sub_lm_context_chars~; we need the same in *tokens*.  Two
+      sources: the existing ~sub_lm_context_tokens~ constructor arg
+      on ~CustomizableRLM~ (authoritative), or the litellm
+      ~max_input_tokens~ metadata (best-effort).
+      ~chars_for_sub_lm~ already prefers the explicit arg -- wire the
+      same precedence for the token figure, no new plumbing needed.
+    - *Where to advertise the tool*: ~count_tokens~ should ride the
+      same "built-in tools" slot as ~llm_query~ in the template, and
+      it should only appear when the tokenize endpoint is actually
+      configured/reachable (so local-only users aren't promised a
+      tool that raises on every call).
+    - *Prompt guidance*: how strong should the nudge be?  One option:
+      "Before every ~llm_query(prompt)~ call, run
+      ~count_tokens(prompt)~ and confirm the result is below
+      ~{sub_lm_context_tokens}~."  Risk: inflates the iteration
+      budget for models that always comply.  Alternative: only nudge
+      in the small-model-tips block alongside the existing batching
+      tip.
+
+**** Subtasks (implementation, after the open questions are settled)
+
+    - [ ] Investigation: spike a ~POST /tokenize~ call against the
+          configured llama.cpp server from a throwaway script to
+          confirm the response shape and measure latency; document
+          the exact payload / response keys in this task block
+    - [ ] Decide endpoint policy (a/b/c above) and record the
+          decision here before coding
+    - [ ] Add ~count_tokens(text: str) -> int~ to
+          ~CustomizableRLM._make_llm_tools~ (or a new
+          ~_make_token_tools~ helper) -- reuses ~self.sub_lm.kwargs["api_base"]~
+          and the sub-LM model name to build the request
+    - [ ] Add ~{sub_lm_context_tokens}~ placeholder to
+          ~ACTION_INSTRUCTIONS_TEMPLATE~ and thread the value through
+          ~build_action_instructions~; use it to render the hard
+          token budget alongside the existing char-capacity figure
+    - [ ] Add ~count_tokens(text: str) -> int~ to the "Available:"
+          tool list in the template, behind a conditional that
+          suppresses the line when the tokenize endpoint is
+          unavailable (per the policy decision)
+    - [ ] Unit test: ~count_tokens~ against a mocked HTTP server
+          returns the expected integer; mismatched-config cases
+          raise a clear error
+    - [ ] Unit test: template rendering includes the token-budget
+          line when ~sub_lm_context_tokens~ is set and omits it when
+          not set
+
+** Sandbox failures
+
+Anything that goes wrong inside the Deno/Pyodide sandbox subprocess:
+runaway code that hangs the interpreter, or an outright crash that
+loses in-REPL state.
+
+*** DONE Add hard timeout to ~CustomizableRLM._execute_iteration~
+
+   The code interpreter (~PythonInterpreter.execute()~) does
+   ~while True: readline()~ with no timeout. When the model generates
+   expensive code (e.g. char-by-char JSON parsing of 144k chars in
+   Pyodide/WASM), it blocks forever. See [[file:debugging.org][debugging.org]], example 71.
+
+   When this happens the whole RLM call should fail immediately --
+   retrying another iteration makes zero sense if the interpreter
+   got stuck.
+
+**** Approach
+
+    ~threading.Timer~ kills the Deno subprocess after ~repl_timeout~
+    seconds. The ~CodeInterpreterError~ that ~execute()~ raises is
+    caught and re-raised as ~REPLTimeoutError~ (a new exception that
+    nothing else catches), so it propagates straight out of ~forward()~.
+
+    #+BEGIN_SRC python
+    import threading
+
+    class REPLTimeoutError(Exception):
+        """Raised when the code interpreter exceeds repl_timeout."""
+
+    # In _execute_iteration, wrap repl.execute:
+    try:
+        code = _strip_code_fences(action.code)
+        timer = threading.Timer(self.repl_timeout, lambda: repl.deno_process.kill())
+        timer.start()
+        try:
+            result = repl.execute(code, variables=dict(input_args))
+        finally:
+            timer.cancel()
+    except (CodeInterpreterError, SyntaxError) as e:
+        if not timer.is_alive() and not timer.cancelled():
+            # Timer fired -- this is a timeout, not a normal error
+            raise REPLTimeoutError(
+                f"Code interpreter timed out after {self.repl_timeout}s"
+            ) from e
+        result = f"[Error] {e}"
+    #+END_SRC
+
+    ~REPLTimeoutError~ is not ~CodeInterpreterError~, so nothing in
+    RLM or our code catches it -- it bubbles up and fails the call.
+
+**** Subtasks
+
+    - [X] Add ~REPLTimeoutError~ exception class
+    - [X] Add ~repl_timeout~ param to ~CustomizableRLM.__init__~ (default 300),
+          passable via ~module.kwargs.repl_timeout~ in config YAML
+    - [X] Add ~threading.Timer~ + ~deno_process.kill()~ to ~_execute_iteration~,
+          re-raise as ~REPLTimeoutError~
+    - [X] Same for ~_aexecute_iteration~
+    - [X] Test with ~debugging/debug_rlm.py~ on example 71
+
+*** TODO Fix cascading NameError/TypeError after Deno sandbox crashes mid-run
+
+   When the Deno/Pyodide sandbox process dies partway through an RLM run,
+   every remaining iteration fails in a cascade: ~NameError: name
+   'llm_query' is not defined~, ~NameError: name 'llm_query_batched' is
+   not defined~, and -- for signatures with a named output field --
+   ~TypeError: SUBMIT() got an unexpected keyword argument 'answer'~.  The
+   model keeps retrying ~SUBMIT(answer=...)~ variants until the iteration
+   budget runs out and the whole trace ends in extract-fallback (or
+   max-iter ERROR) despite the model often having the right answer
+   computed in-process before the crash.
+
+   Reproduced in the real trace at
+   ~debugging/failing_trace_qwen3.5_4b.json~ (Phoenix project
+   ~dspy-sft-longbench-qwen4b~, trace id
+   ~bb12a4d1a5b06eb56df4786f2f676024~).  Triggering event: step 6's
+   ~llm_query_batched~ with 50 prompts produced ~[Error] Error: Unhandled
+   async error: PythonError~ (a Pyodide async-FFI failure that killed the
+   Deno subprocess -- same FD/socket exhaustion family as the ~OSError:
+   [Errno 24] Too many open files~ seen at the root of a neighbouring
+   ERROR-status trace).
+
+**** Root cause (upstream, in dspy)
+
+    ~python_interpreter.py~ only resets ~_tools_registered~ /
+    ~_mounted_files~ on the ~BrokenPipeError~ path (line 480-490).  The
+    empty-~readline()~ path at line 495-499 -- which triggers when the
+    subprocess dies *during* execution rather than at the write -- raises
+    ~CodeInterpreterError("No output from Deno subprocess...")~ without
+    resetting the flags.  The next ~execute()~ spawns a fresh Deno via
+    ~_ensure_deno_process~, but ~_register_tools~ short-circuits because
+    the flag is still ~True~.  Only ~PYTHON_SETUP_CODE~'s default
+    single-arg ~SUBMIT(output)~ survives on the new process; tool wrappers
+    and the typed ~SUBMIT(answer)~ from ~makeSubmitWrapper~ are gone.
+
+**** Failing test (already added)
+
+    ~test_customizable_rlm.py::TestInterpreterCrashRecovery::test_typed_submit_survives_deno_process_death~
+    kills the Deno process, runs ~SUBMIT(answer='after')~, and expects
+    ~FinalOutput({"answer": "after"})~.  Currently fails with
+    ~CodeInterpreterError: TypeError: ["SUBMIT() got an unexpected keyword
+    argument 'answer'"]~ -- exact same error string the real trace
+    recorded.  Should pass once Piece 1 below lands.
+
+**** Approach (two pieces, in ~customizable_rlm.py~)
+
+    *Piece 1 -- self-healing registration.* In ~_execute_iteration~ and
+    ~_aexecute_iteration~, unconditionally reset the registration flags on
+    ~repl~ before calling ~repl.execute(...)~:
+
+    #+BEGIN_SRC python
+    if hasattr(repl, "_tools_registered"):
+        repl._tools_registered = False
+    if hasattr(repl, "_mounted_files"):
+        repl._mounted_files = False
+    #+END_SRC
+
+    Cost: one extra JSON-RPC ~register~ round-trip per iteration against
+    an in-process Deno (negligible vs. the LM call).  Benefit: any
+    subprocess restart (BrokenPipe path, dead-readline path, or a future
+    unrelated crash mode) self-heals.
+
+    *Piece 2 -- honest observation when the sandbox crashed.* Catch the
+    ~CodeInterpreterError("No output from Deno subprocess...")~ raised by
+    ~repl.execute~, surface it to the trajectory as:
+
+    #+BEGIN_EXAMPLE
+    [Error] Interpreter process crashed and was restarted.
+    Input variables (context, query, ...) are still available, but any
+    intermediate variables you defined in previous steps have been lost.
+    Re-compute them if needed.
+    #+END_EXAMPLE
+
+    Input variables are re-injected by
+    ~PythonInterpreter._inject_variables~ every ~execute()~ call, so
+    ~context~ / ~query~ / etc. survive restart.  In-REPL state built up by
+    prior iterations (computed Counters, cached analyses, fetched LLM
+    outputs) does NOT survive -- and we deliberately do *not* replay
+    earlier trajectory code, because:
+    - ~llm_query~ / ~llm_query_batched~ cost real money per call
+    - ~_make_llm_tools~ keeps ~state["call_count"]~ on the Python side, so
+      replay could trip ~max_llm_calls~ mid-rebuild
+    - Sampling is non-deterministic; replayed outputs will not match what
+      the original trajectory recorded
+    - User tools may have side effects outside the sandbox
+
+    The model already has the full trajectory in its context and can
+    decide what to recompute against the clean-slate REPL.
+
+**** Subtasks
+
+    - [X] Write crash-recovery test (~TestInterpreterCrashRecovery~ in
+          ~test_customizable_rlm.py~: kills ~deno_process~, applies the
+          Piece 1 reset, asserts typed SUBMIT still works on the next
+          ~execute()~)
+    - [X] Piece 1: ~_force_registration_reset(repl)~ helper in
+          ~customizable_rlm.py~, called before each ~repl.execute~ in
+          both ~_execute_iteration~ and ~_aexecute_iteration~
+    - [X] Verify the three crash-recovery tests pass
+    - [X] Piece 2: ~_format_execute_error(e, input_arg_names)~ helper
+          renders ~"No output from Deno subprocess"~ errors as a
+          crash-restart observation naming the input variables still
+          available; wired into both sync/async iteration exception
+          handlers, routed through the normal ~[Error] ...~ observation
+          path so it lands in REPL history
+    - [X] Unit tests for the crash-observation formatter and the
+          passthrough for other errors
+    - [ ] Stretch: end-to-end test that simulates the dead-readline path
+          inside a real ~execute()~ call (monkey-patch
+          ~repl.deno_process.stdout.readline~ to return ~""~ once), assert
+          the crash observation lands in history and the next iteration
+          sees input variables restored
+    - [ ] Upstream issue/PR against dspy to reset the flags on the
+          dead-readline path in ~PythonInterpreter.execute~ (makes
+          Piece 1 unnecessary once merged)
+
+** Adapter parse failures
+
+Anything that goes wrong when ~ChatAdapter~ parses the LM's
+reasoning/code response.  Prevention via better field-description
+prompting (#5), recovery via short-circuiting the JSONAdapter retry
+when prevention fails (#2).
+
+*** DONE Catch ~AdapterParseError~ instead of falling back to ~JSONAdapter~
+
+   When ~ChatAdapter~ parses the LM response for ~generate_action~ and
+   finds ~reasoning~ but no ~[[ ## code ## ]]~ section, it raises
+   ~AdapterParseError~.  ~ChatAdapter.__call__~ (chat_adapter.py:74)
+   catches *all* exceptions and retries with a fresh ~JSONAdapter()~,
+   which makes a second LM call with heavier JSON-formatted prompting.
+   This compounds across iterations and inflates RLM wall-clock time.
+
+   Fix: catch ~AdapterParseError~ around the ~self.generate_action(...)~
+   call in an overridden ~_execute_iteration~ (and ~_aexecute_iteration~)
+   in ~CustomizableRLM~.  When caught, return a ~Prediction~-like object
+   with the partially parsed ~reasoning~ (available via
+   ~error.parsed_result~) and ~code=""~.  The empty code will produce a
+   no-op REPL output and the next iteration gets feedback to include the
+   code field.
+
+**** Why not make ~code~ optional
+
+    The ~code~ field is defined at rlm.py:290 as
+    ~dspy.OutputField(..., type_=str)~.  Changing it to ~Optional[str]~
+    would live in the upstream dspy package, and
+    ~RLM._process_execution_result~ (line 475) calls
+    ~_strip_code_fences(pred.code)~ which would blow up on ~None~.
+    Catching the error downstream in ~CustomizableRLM~ avoids touching
+    upstream code.
+
+**** Approach
+
+    1. Override ~_execute_iteration~ in ~CustomizableRLM~
+    2. Wrap ~self.generate_action(...)~ in a ~try/except AdapterParseError~
+    3. On catch: build a stub prediction with ~reasoning~ from
+       ~error.parsed_result.get("reasoning", "")~ and ~code=""~
+    4. Let the existing flow handle it -- ~_strip_code_fences("")~ returns
+       ~""~, ~repl.execute("")~ produces no output, iteration continues
+    5. Optionally: disable the fallback entirely by using
+       ~dspy.settings.context(adapter=ChatAdapter(use_json_adapter_fallback=False))~
+       around the call, so the ~AdapterParseError~ propagates immediately
+       instead of being swallowed by the fallback path first
+
+**** Key locations
+
+    - ~AdapterParseError~: ~dspy/utils/exceptions.py~
+      - Has ~parsed_result: dict | None~ with successfully parsed fields
+    - ~ChatAdapter.__call__~: ~dspy/adapters/chat_adapter.py:64-86~
+      - Catches all exceptions, falls back to ~JSONAdapter()~
+      - ~use_json_adapter_fallback~ flag controls this (default ~True~)
+    - ~ChatAdapter.parse~: ~dspy/adapters/chat_adapter.py:239-244~
+      - Raises ~AdapterParseError(parsed_result=fields)~ when fields
+        are incomplete
+    - ~Predict.forward~: ~dspy/predict/predict.py:191~
+      - Uses ~settings.adapter or ChatAdapter()~
+      - Can be overridden per-call via ~dspy.settings.context(adapter=...)~
+    - ~RLM._execute_iteration~: ~dspy/predict/rlm.py:506-534~
+      - Calls ~self.generate_action(...)~ then ~repl.execute(code)~
+    - ~RLM._aexecute_iteration~: ~dspy/predict/rlm.py:593-621~
+      - Async version, same structure
+
+**** Subtasks
+
+    - [ ] Override ~_execute_iteration~ in ~CustomizableRLM~
+    - [ ] Override ~_aexecute_iteration~ in ~CustomizableRLM~
+    - [ ] Verify ~repl.execute("")~ is a safe no-op (or handle gracefully)
+    - [ ] Add a ~logger.warning~ when the fallback triggers so it shows
+          in traces / logs
+    - [ ] Test with a mock LM that returns reasoning but no code field
+
+*** DONE Fix RLM code field description nudging small models to skip the [[ ## code ## ]] marker
+
+   Upstream ~RLM._build_signatures~ (~dspy/predict/rlm.py:290~) declares the
+   ~code~ output field with description ~"Python code to execute. Use markdown
+   code block format: \`\`\`python\\n<code>\\n\`\`\`"~.  ChatAdapter renders
+   that sentence inside the field's marker block in the system prompt, so the
+   LM reads "use markdown code block format" as the instruction for how to
+   delimit the ~code~ field.  Small models (Qwen3.5-4B observed) substitute
+   the markdown fence *instead of* the ~[[ ## code ## ]]~ marker rather than
+   wrapping the code *in addition to* it.  The ChatAdapter parser only
+   recognises the bare marker (regex at ~chat_adapter.py:21~), so it never
+   finds the ~code~ field, parses only ~reasoning~, and raises
+   ~AdapterParseError~ -- the cascade pattern documented in
+   [[file:debugging.org][debugging.org]] (40 of 43 root-OK-descendants-ERROR
+   traces in ~dspy-sft-longbench-qwen4b~).
+
+**** Why the existing knobs cannot fix this
+
+    - ~_patch_instructions~ in ~customizable_rlm.py~ only mutates
+      ~signature.instructions~ (the body of ~ACTION_INSTRUCTIONS_TEMPLATE~).
+      It does not touch per-field descriptions.
+    - ~_inject_tips~ appends to the instruction body, same story.
+    - Markdown fences are *never required* by the parser; they are
+      tolerated and stripped post-parse by ~_strip_code_fences~.  The
+      problematic instruction is purely cosmetic but actively misleading.
+
+**** Approach
+
+    Override ~_build_signatures~ in ~CustomizableRLM~ to construct both
+    signatures locally instead of inheriting them from upstream.  The body
+    is a near-verbatim copy of upstream's method (lines ~263-311 of the
+    venv ~rlm.py~), with two changes:
+
+    1. Use ~prompts.ACTION_INSTRUCTIONS_TEMPLATE~ (the local copy, already
+       created in ~prompts.py~) as the instruction template source instead
+       of upstream's ~ACTION_INSTRUCTIONS_TEMPLATE~.
+    2. Replace the ~code~ ~OutputField~ description with one that does NOT
+       mention markdown fences and explicitly names the marker convention,
+       e.g.
+
+       #+BEGIN_EXAMPLE
+       Python code to execute.  Output it directly after the
+       [[ ## code ## ]] marker; markdown code fences (```python ... ```)
+       are optional and will be stripped.
+       #+END_EXAMPLE
+
+    With this in place, ~_patch_instructions~ becomes a single regex
+    substitution + optional ~_inject_tips~ on a string we already own --
+    no post-construction signature mutation needed.
+
+**** Subtasks
+
+    - [X] Override ~_build_signatures~ in ~CustomizableRLM~ (done as part
+          of the prompt-construction refactor above; uses
+          ~build_action_instructions~ for the instruction body)
+    - [X] Replace the ~code~ ~OutputField~ description: now reads "Python
+          code to execute. Output it directly after the [[ ## code ## ]]
+          marker; markdown code fences (```python ... ```) are optional
+          and will be stripped." -- no more "use markdown code block
+          format" nudge
+

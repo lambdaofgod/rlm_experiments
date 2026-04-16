@@ -140,7 +140,7 @@ class CustomizableRLM(RLM):
             .append("repl_history", dspy.InputField(desc="Previous REPL code executions and their outputs"), type_=REPLHistory)
             .append("iteration", dspy.InputField(desc="Current iteration number (1-indexed) out of max_iterations"), type_=str)
             .append("reasoning", dspy.OutputField(desc="Think step-by-step: what do you know? What remains? Plan your next action."), type_=str)
-            .append("code", dspy.OutputField(desc="Python code to execute. Use markdown code block format: ```python\n<code>\n```"), type_=str)
+            .append("code", dspy.OutputField(desc="Python code to execute. Output it directly after the `[[ ## code ## ]]` marker; markdown code fences (```python ... ```) are optional and will be stripped."), type_=str)
         )
 
         extract_instructions = """Based on the REPL trajectory, extract the final outputs now.

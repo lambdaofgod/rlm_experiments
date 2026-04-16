@@ -12,8 +12,8 @@ You have access to a Python REPL environment. Write Python code and it will be e
 
 Available:
 - Variables: {inputs} (your input data)
-- `llm_query(prompt)` - query a sub-LLM (~{capacity_chars_k}K char capacity) for semantic analysis
-- `llm_query_batched(prompts)` - query multiple prompts concurrently (much faster for multiple queries)
+- `llm_query(prompt: str) -> str` - query a sub-LLM (~{capacity_chars_k}K char capacity) for semantic analysis. `prompt` MUST be a plain string; serialize dicts/lists with `json.dumps` before passing.
+- `llm_query_batched(prompts: list[str]) -> list[str]` - query multiple prompts concurrently (much faster for multiple queries). Every element of `prompts` MUST be a plain string.
 - `print()` - ALWAYS print to see results
 - `SUBMIT({final_output_names})` - submit final output when done
 - Standard libraries: re, json, collections, math, etc.
