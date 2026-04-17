@@ -73,147 +73,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
    - [ ] Run ~verify_data.py~ to inspect output
    - [ ] Confirm OpenAI chat format with DSPy signature structure
 
-** DONE Implement ~CustomizableRLM~
-   See [[file:customized_rlm.org][customized_rlm.org]] for full specification.
-   - [X] Read upstream ~rlm.py~ to confirm method names and injection points
-   - [X] Implement ~CustomizableRLM.__init__~ (~sub_lm_context_tokens~, ~small_model_tips~, ~safety_factor~)
-   - [X] Implement ~chars_for_sub_lm~ static helper (token path, LM path, precedence)
-   - [X] Override ~_get_system_prompt~ (or post-init patch) to replace capacity figure
-   - [X] Implement ~_inject_tips~ (batching block + context-length warning for <=100k)
-
-*** DONE Use module type from config for span name matching in eval/export
-
-    ~evaluate.py~ and ~export_traces.py~ hardcode ~"RLM.forward"~ as the
-    span name filter.  Now that configs use ~CustomizableRLM~, the span
-    name is ~CustomizableRLM.forward~, so ~fetch_predictions~ returns
-    zero matches.  Derive span name from ~cfg.module.type~ instead.
-    Also fix ~README.md~ outdated ~evaluate.py phoenix~ subcommand.
-
-    - [X] Update ~fetch_predictions~ to filter on ~f"{module_type}.forward"~
-    - [X] Update ~export_traces.py~ span filter likewise
-    - [X] Fix ~README.md~ CLI examples and config sample
-
-** DONE Test ~CustomizableRLM~
-   - [X] Unit tests for prompt string mutations
-   - [X] Unit tests for ~chars_for_sub_lm~ (token-only, LM-only, both, neither)
-   - [ ] Integration smoke test with ~MockInterpreter~ at 100k setting
-
-** DONE Evaluate RLM predictions via Phoenix traces
-
-   Instead of parsing SFT JSONL output (which contains interleaved RLM
-   action steps with unresolvable variable references in SUBMIT calls),
-   fetch completed traces from Phoenix and extract final answers directly.
-
-   ~evaluate.py phoenix --config_path=config.yaml --n_traces=10~
-
-   Uses ~traces_endpoint~, ~traces_project~, and ~dataset.path~ from the
-   config YAML.
-
-*** Phoenix span schema (verified)
-
-    Tested against local Phoenix at ~http://localhost:6006~.
-
-    - ~from phoenix.client import Client~ / ~Client(base_url=...)~
-      (~arize-phoenix-client~ package, already added)
-    - ~client.spans.get_spans_dataframe(project_name=..., root_spans_only=True, limit=N)~
-    - Root spans have ~name='RLM.forward'~, ~span_kind='CHAIN'~
-    - Columns: ~attributes.input.value~, ~attributes.output.value~, ~status_code~, ~start_time~, etc.
-    - ~status_code~: ~'OK'~ for completed, ~'ERROR'~ for failed (filter these out)
-    - Input is JSON: ~{"input_args": {"context": "...", "query": "..."}}~
-      - Does NOT contain dataset row ~id~ -- must match by query text
-    - Output is JSON list: ~["Prediction(\n    answer='...VALUE...',\n    trajectory=[...])", [...]]~
-      - ~parsed[0]~ is the Prediction repr string
-      - Answer extraction: split on ~"',\n    trajectory="~, strip ~"Prediction(\n    answer='"~ prefix
-      - Answers may have ~[Answer]\n~ prefix from LongBench-Pro format leak -- strip it
-    - Matching to dataset: span's ~input_args.query~ corresponds to
-      ~question_nonthinking~ (via prompt template).  Try direct match first;
-      if no match, apply ~transform_question~ and retry (handles pre-transform
-      spans).  *HACK* -- this is fragile and depends on transform_question
-      being idempotent-ish.  Needs a systematic fix: either pass the row ~id~
-      through to spans (e.g. as span attribute or in input), or store a
-      lookup key in the dataset.
-    - Duplicates: multiple spans can match the same dataset row (retries);
-      group by matched ~question_nonthinking~, take the latest span per group
-
-*** Approach
-
-    1. Connect to Phoenix: ~Client(base_url=traces_endpoint)~
-    2. Fetch root spans: ~client.spans.get_spans_dataframe(project_name=..., root_spans_only=True, limit=N)~
-    3. Filter to ~status_code == 'OK'~ only
-    4. For each span, extract answer from ~attributes.output.value~ (parse JSON list, split Prediction repr)
-    5. Match to dataset row by comparing query text to ~question_nonthinking~ column
-    6. Deduplicate: keep most recent span per dataset row (by ~start_time~)
-    7. Evaluate using existing LongBench-Pro metric functions
-
-*** Dependencies
-
-    - [X] ~uv add arize-phoenix-client~ (already installed v1.31.0)
-
-*** Subtasks
-
-    - [X] Add ~fetch_predictions(phoenix_endpoint, project_name, n_traces, dataset_path)~
-      - Connect, fetch root spans, filter OK, extract answers, match to rows
-      - Return DataFrame with ~id~ and ~pred_answer~ columns
-    - [X] Add ~evaluate_phoenix(config_path, n_traces, show_errors)~ CLI command
-      - Read ~traces_endpoint~, ~traces_project~, ~dataset.path~ from config
-      - Call ~fetch_predictions~, then score with ~_score_predictions~
-    - [X] Investigate Phoenix span schema (see above)
-    - [X] Test on sample project (~dspy-sft-longbench-sample-opus~: 13 OK / 6 ERROR out of 19)
-    - [X] Report non-OK trace errors in evaluation output
-
-*** DONE Report non-OK trace errors in evaluation output
-
-    ~evaluate.py~ silently drops spans with ~status_code != "OK"~ via the
-    filter in ~fetch_predictions~. The ~status_message~ column from the
-    tracing backend contains error details (iteration limit exceeded,
-    timeout, parse errors, etc.) but this information is never surfaced.
-
-    For understanding model failure modes, it is important to know *why*
-    traces failed -- not just how many.
-
-    - [X] In ~fetch_predictions~, collect non-OK spans and their
-      ~status_message~ values
-    - [X] Print a summary of error counts grouped by error type/message
-      (always, not gated by ~--show_errors~)
-    - [X] When ~--show_errors~ is set, print individual error details
-      (span id, query snippet, status_message)
-    - [X] Include error breakdown in ~--output_metrics~ JSON report
-
-*** Metric mapping (~secondary_task~ -> metric)
-
-    Existing metrics in ~evaluate.py~ (already implemented):
-
-    | secondary_task | Metric            | Description                                          |
-    |----------------+-------------------+------------------------------------------------------|
-    | T1.1, T1.2     | NDCG              | Ranking quality; gold positions = relevance scores    |
-    | T2.1, T2.2     | Pairwise_Accuracy | Fraction of item pairs in correct relative order      |
-    | T3.1, T3.2     | Accuracy          | Exact match on first element only                    |
-    | T4.1, T4.2     | Summary           | 0.5*SemSim + 0.5*ROUGE-L (stub, needs embedding)    |
-    | T5.1, T5.2     | F1_Score          | Set-level F1 over answer elements                    |
-    | T6.1           | SubEM             | Fraction of gold elements present in prediction      |
-    | T6.2           | F1_Score          | Set-level F1                                         |
-    | T6.3           | Pairwise_Accuracy | Pair ordering                                        |
-    | T7.1-T7.3      | F1_Score          | Set-level F1                                         |
-    | T8.1-T8.3      | SubEM             | Subset exact match                                   |
-    | T9.1, T9.2     | F1_Score          | Set-level F1                                         |
-    | T10.1, T10.2   | SubEM             | Subset exact match                                   |
-    | T11.1, T11.2   | Accuracy          | Exact match on first element                         |
-
-** DONE Filter dataset by context length via config
-
-   Add optional ~dataset.token_lengths~ list to config YAML to restrict
-   which context sizes to include (e.g. ~["8k", "16k", "32k"]~).
-   When omitted, include all sizes.  Apply filter in ~load_dataset~
-   before building examples.
-
-   Available values: 8k, 16k, 32k, 64k, 128k, 256k.
-
-** DONE Stratify evals by context length and difficulty
-
-   LongBench-Pro has ~token_length~ (8k, 16k, 32k, 64k, 128k, 256k) and
-   ~difficulty~ (Easy, Moderate, Hard, Extreme) columns.  Add per-dimension
-   score breakdowns to ~_score_predictions~ output.
-
 ** DONE Validate config with Pydantic
 
    Replace raw ~yaml.safe_load~ dict access with a Pydantic ~BaseModel~.
@@ -230,68 +89,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
    - [X] Replace config dict access in ~collect_sft_data.py~ and
      ~evaluate.py~ with parsed ~Config~ model
    - [X] Validate on load: ~Config.model_validate(yaml.safe_load(f))~
-
-** DONE Export eval results to JSON via ~--output_metrics~
-
-   Add ~--output_metrics=path.json~ flag to ~evaluate~ and ~evaluate_phoenix~.
-   Writes a JSON file with two top-level keys:
-   - ~summary~: aggregated scores (per-task, per-metric, per-length,
-     per-difficulty, overall) -- same info currently printed to stdout
-   - ~examples~: per-row results (~id~, ~task~, ~metric~, ~score~,
-     ~gold_answer~, ~pred_answer~)
-
-*** Pydantic models (in ~config_model.py~)
-
-    Define the JSON output shape as composable Pydantic models.  These
-    serve as both validation and serialization -- ~.model_dump()~ gives
-    us the JSON directly.
-
-    1. ~GroupStats~ -- reusable stats for any grouping dimension:
-       - ~avg: float~
-       - ~n: int~
-
-    2. ~ScoredExample~ -- one scored row:
-       - ~id: str~
-       - ~task: str~ (task code, e.g. "T1.1")
-       - ~metric: str~ (metric function name, e.g. "f1_score")
-       - ~score: float~
-       - ~gold_answer: list[str]~
-       - ~pred_answer: list[str]~
-       - ~token_length: Optional[str]~ (present if dataset has it)
-       - ~difficulty: Optional[str]~ (present if dataset has it)
-
-    3. ~EvalSummary~ -- aggregated scores across dimensions:
-       - ~per_task: dict[str, GroupStats]~
-       - ~per_metric: dict[str, GroupStats]~
-       - ~per_length: Optional[dict[str, GroupStats]]~
-       - ~per_difficulty: Optional[dict[str, GroupStats]]~
-       - ~overall: GroupStats~
-       - ~skipped: int~
-
-    4. ~EvalReport~ -- top-level output written to JSON:
-       - ~summary: EvalSummary~
-       - ~examples: list[ScoredExample]~
-
-*** Helpers in ~evaluate.py~
-
-    1. ~_score_row(row) -> ScoredExample | None~ -- scores a single
-       merged DataFrame row.  Returns ~None~ if no metric or NaN score.
-    2. ~_aggregate(results: list[ScoredExample]) -> EvalSummary~ --
-       groups scores by task/metric/length/difficulty, builds
-       ~GroupStats~ per group.
-    3. ~_print_summary(summary: EvalSummary, results, show_errors)~ --
-       prints to stdout (same output as today, reads from model fields).
-    4. ~_score_predictions~ becomes orchestrator: merge, loop with
-       ~_score_row~, call ~_aggregate~ and ~_print_summary~, then if
-       ~output_metrics~ is set, build ~EvalReport~ and write
-       ~.model_dump()~ as JSON.
-
-*** Subtasks
-
-    - [X] Add ~GroupStats~, ~ScoredExample~, ~EvalSummary~, ~EvalReport~ to ~config_model.py~
-    - [X] Add ~_score_row~, ~_aggregate~, ~_print_summary~ helpers to ~evaluate.py~
-    - [X] Refactor ~_score_predictions~ to use them
-    - [X] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
 
 ** DONE Export SFT training data from Phoenix traces
 
@@ -388,156 +185,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [X] Pass them through to ~dspy.LM()~ in ~collect_sft_data.py~
     - [X] Create a test config YAML pointing at a local endpoint
     - [X] Smoke test with a local vLLM/SGLang server
-
-** TODO Clean up trace-to-dataset matching in ~fetch_predictions~
-
-   ~fetch_predictions~ in ~evaluate.py~ has two problems:
-
-   1. *Legacy fallback code*: after the direct
-      ~question_to_row.get(query)~ lookup, there are two fallback paths
-      that apply ~transform_question~ in various directions (lines
-      335-341).  These were needed when some Phoenix spans predated the
-      parquet being regenerated with ~transform_question~ applied.  All
-      current runs use the already-transformed parquet, so the direct
-      match always succeeds.  The fallback code is dead weight that
-      makes the matching logic look fragile and harder to reason about.
-
-   2. *Conflated error counter*: the ~unmatched~ counter (and the
-      ~Warning: N spans could not be matched~ message) lumps together
-      two different failure modes:
-      - Actual query mismatches (query text not found in parquet)
-      - Output parse failures (~_extract_answer_from_prediction_repr~
-        raises on spans where RLM never called ~SUBMIT~)
-      This is misleading -- the 7 "unmatched" spans in the
-      ~dspy-sft-longbench-qwen4b~ project are all output parse
-      failures, not query mismatches.
-
-*** Subtasks
-
-    - [ ] Remove ~transform_question~ fallback paths from ~fetch_predictions~
-          (keep only the direct ~question_to_row.get(query)~ lookup)
-    - [ ] Remove the ~transformed_to_row~ dict construction
-    - [ ] Remove the ~from data_utils import transform_question~ import
-    - [ ] Split ~unmatched~ into two counters: ~query_mismatches~ and
-          ~parse_failures~, with separate warning messages
-    - [ ] Consider scoring parse failures as 0 instead of dropping them
-
-** DONE Compare evaluation results across models
-
-   Current eval pipeline has survivorship bias: ~fetch_predictions~ drops
-   ERROR traces, and ~_score_predictions~ does an inner join -- so failed
-   attempts are invisible.  A model that fails on hard problems but aces
-   easy ones looks better than one that attempts everything.
-
-   Create ~compare_evals.py~ that does an outer join across two (or more)
-   eval result JSONs to give a fair comparison.
-
-*** Inputs
-
-    - Two or more ~--output_metrics~ JSON files (from ~evaluate.py~)
-    - The dataset parquet (for total problem count and metadata)
-
-*** Output
-
-    For each pair of models, report:
-
-    1. *Completion matrix* -- which problems each model scored vs missed:
-       - Both scored: N
-       - Only model A scored: N (model B failed/not attempted)
-       - Only model B scored: N (model A failed/not attempted)
-       - Neither scored: N
-
-    2. *Head-to-head on shared problems* (both scored):
-       - Model A wins / ties / Model B wins (by score)
-       - Average score per model (on the shared subset only)
-       - Per-task breakdown
-
-    3. *Adjusted overall scores* -- treat missing predictions as score=0:
-       - adjusted_avg = sum(scores) / total_dataset_size
-       - This penalizes models that fail to produce answers
-
-    4. *Per-dimension breakdowns* (token_length, difficulty) with
-       adjusted scores
-
-*** Approach
-
-    1. Load each metrics JSON: build ~{id: ScoredExample}~ dict per model
-    2. Load dataset parquet: get full set of IDs + metadata
-    3. Outer join on ID across models
-    4. Categorize each ID: scored-by-which-models
-    5. Compute head-to-head stats on intersection
-    6. Compute adjusted scores using dataset size as denominator
-    7. Print comparison table; optionally write to JSON
-
-*** Subtasks
-
-    - [X] Create ~compare_evals.py~ with fire CLI
-    - [X] Implement ~load_eval_results(metrics_json) -> dict[id, ScoredExample]~
-    - [X] Implement ~build_comparison(results_a, results_b, dataset_df)~
-      - Outer join, categorize, compute stats
-    - [X] Implement adjusted scoring (missing = 0)
-    - [X] Print comparison summary table
-    - [X] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
-
-** TODO Categorize failures in eval pipeline
-
-   Currently ~fetch_predictions~ discards all ERROR traces and the
-   metrics JSON only contains successfully scored examples.  When
-   comparing models we need to know not just "how many failed" but
-   *why* they failed -- timeout vs parse error vs server crash vs
-   RLM max iterations exhausted.
-
-*** Failure types to distinguish
-
-    | Type            | Source                                    | How to detect                                                   |
-    |-----------------+-------------------------------------------+-----------------------------------------------------------------|
-    | timeout         | litellm.Timeout / httpx.ReadTimeout       | ERROR span, error message contains "timeout" or "timed out"     |
-    | server_error    | HTTP 500, connection refused, OOM          | ERROR span, error message contains HTTP status or connection err |
-    | max_iterations  | RLM hit 20 iterations without SUBMIT      | OK span (extract fallback runs), but has Predict.forward child  |
-    | parse_error     | DSPy adapter couldn't parse LLM output    | ERROR span, error message contains "AdapterParseError"          |
-    | not_attempted   | Example not in traces at all              | No matching trace for this dataset ID                           |
-
-*** Changes to ~evaluate.py~
-
-    1. ~fetch_predictions~ gains a ~fetch_failures=True~ parameter
-       - Also fetches ~status_code == 'ERROR'~ root spans
-       - Matches them to dataset rows (same query-text matching)
-       - Categorizes each by error message pattern matching
-       - Returns failures as a separate DataFrame or dict
-
-    2. New Pydantic models in ~config_model.py~:
-       - ~FailureCounts~: ~timeout: int~, ~server_error: int~,
-         ~parse_error: int~, ~max_iterations: int~, ~not_attempted: int~
-       - Add ~failures: Optional[FailureCounts]~ to ~EvalReport~
-
-    3. ~evaluate_phoenix~ populates ~failures~ in the output JSON
-
-*** Changes to ~compare_evals.py~
-
-    When failure data is present in both metrics JSONs, show a
-    breakdown in the completion matrix:
-
-    #+BEGIN_EXAMPLE
-    === Failure breakdown: model_a vs model_b ===
-                   model_a    model_b
-    Scored:            182         20
-    Timeout:             3          1
-    Server error:        0          2
-    Max iterations:      5          3
-    Parse error:         2          1
-    Not attempted:     558        723
-    Total:             750        750
-    #+END_EXAMPLE
-
-*** Subtasks
-
-    - [ ] Investigate Phoenix ERROR span format (error message field)
-    - [ ] Add ~FailureCounts~ to ~config_model.py~
-    - [ ] Add failure fetching + categorization to ~fetch_predictions~
-    - [ ] Include ~failures~ in ~EvalReport~ JSON output
-    - [ ] Update ~compare_evals.py~ to show failure breakdown
-    - [ ] Test with ~dspy-sft-longbench-finetuned-qwen4b~ project
-          (has 9 ERROR spans to categorize)
 
 ** DONE Abstract tracing backend -- decouple from Arize Phoenix
 
@@ -898,55 +545,6 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [ ] Verify ~ChainOfThought~ works with structured output
     - [ ] Document provider prefix implications in config examples
 
-** DONE Move RLM prompt construction into prompts.py
-
-   ~CustomizableRLM~ builds the action instructions in three places today:
-   upstream's ~ACTION_INSTRUCTIONS_TEMPLATE~, our ~_patch_instructions~
-   (regex substitution of the capacity figure), and ~_inject_tips~
-   (appended tip blocks).  Consolidate this into a single builder function
-   in ~prompts.py~ and delete the post-init signature-mutation logic from
-   ~customizable_rlm.py~.
-
-*** Approach
-
-    Add to ~prompts.py~:
-
-    #+BEGIN_SRC python
-    def build_action_instructions(
-        sub_lm_context_chars: int,
-        *,
-        small_model_tips: bool = False,
-    ) -> str:
-        """Capacity-figure-substituted action template, optionally with
-        small-model tips appended."""
-        ...
-    #+END_SRC
-
-    The function does the ~~500K char capacity~ substitution and, when
-    ~small_model_tips=True~, appends the two tip blocks (context-length
-    warning at <=100k chars, batching block at <=200k chars).
-    ~CustomizableRLM._build_signatures~ (the override added in the field-
-    description fix task below) calls this builder once and passes the
-    result straight to ~dspy.Signature~ -- no post-init mutation.
-
-*** Subtasks
-
-    - [X] Add ~build_action_instructions~ in ~prompts.py~ (single
-          ~.format()~ call; capacity figure and tips block wired in via
-          ~{capacity_chars_k}~ and ~{small_model_tips_block}~ placeholders
-          on the local copy of the template -- no post-hoc substitution)
-    - [X] Move the capacity-figure substitution logic into it
-    - [X] Move both tip blocks into ~prompts.CONTEXT_LENGTH_TIP~ and
-          ~prompts.BATCHING_TIP~ constants
-    - [X] Delete ~_patch_instructions~, ~_inject_tips~, and the
-          ~self._patch_instructions()~ call from ~customizable_rlm.py~;
-          replaced by an override of ~_build_signatures~ that calls
-          ~build_action_instructions~
-    - [X] Repoint ~TestPromptPatching~ tests in
-          ~test_customizable_rlm.py~ at ~build_action_instructions~
-          directly (no full ~CustomizableRLM~ construction)
-    - [X] All 15 tests in ~test_customizable_rlm.py~ pass
-
 ** DONE Make project importable as a package
 
    Scripts in subdirectories (e.g. ~debugging/~, ~prompt_optimization/~)
@@ -1103,9 +701,409 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [X] Test: run collection on sample dataset, then re-run and verify
           examples are skipped; re-run with ~--rerun_all~ and verify all run
 
+* CustomizableRLM
+
+The local subclass of upstream ~dspy.RLM~ that adds the small-model
+context-handling features and the prompt builder.
+
+** DONE Implement ~CustomizableRLM~
+   :PROPERTIES:
+   :CLOSED: <2026-03-09>
+   :END:
+   See [[file:customized_rlm.org][customized_rlm.org]] for full specification.
+   - [X] Read upstream ~rlm.py~ to confirm method names and injection points
+   - [X] Implement ~CustomizableRLM.__init__~ (~sub_lm_context_tokens~, ~small_model_tips~, ~safety_factor~)
+   - [X] Implement ~chars_for_sub_lm~ static helper (token path, LM path, precedence)
+   - [X] Override ~_get_system_prompt~ (or post-init patch) to replace capacity figure
+   - [X] Implement ~_inject_tips~ (batching block + context-length warning for <=100k)
+
+** DONE Test ~CustomizableRLM~
+   :PROPERTIES:
+   :CLOSED: <2026-03-09>
+   :END:
+   - [X] Unit tests for prompt string mutations
+   - [X] Unit tests for ~chars_for_sub_lm~ (token-only, LM-only, both, neither)
+   - [ ] Integration smoke test with ~MockInterpreter~ at 100k setting
+
 ** DONE Document ~CustomizableRLM~
+   :PROPERTIES:
+   :CREATED: <2026-03-09>
+   :CLOSED:  <2026-04-15>
+   :END:
    - [X] Docstrings on class and ~chars_for_sub_lm~
    - [ ] Entry in ~CHANGELOG.md~
+
+* Evals
+
+Eval pipeline for grading RLM predictions against LongBench-Pro labels:
+trace fetch, dataset matching, scoring helpers, and cross-model
+comparison.
+
+** DONE Use module type from config for span name matching in eval/export
+   :PROPERTIES:
+   :CLOSED: <2026-03-13>
+   :END:
+
+   ~evaluate.py~ and ~export_traces.py~ hardcode ~"RLM.forward"~ as the
+   span name filter.  Now that configs use ~CustomizableRLM~, the span
+   name is ~CustomizableRLM.forward~, so ~fetch_predictions~ returns
+   zero matches.  Derive span name from ~cfg.module.type~ instead.
+   Also fix ~README.md~ outdated ~evaluate.py phoenix~ subcommand.
+
+   - [X] Update ~fetch_predictions~ to filter on ~f"{module_type}.forward"~
+   - [X] Update ~export_traces.py~ span filter likewise
+   - [X] Fix ~README.md~ CLI examples and config sample
+
+** DONE Evaluate RLM predictions via Phoenix traces
+   :PROPERTIES:
+   :CREATED: <2026-03-09>
+   :CLOSED:  <2026-03-10>
+   :END:
+
+   Instead of parsing SFT JSONL output (which contains interleaved RLM
+   action steps with unresolvable variable references in SUBMIT calls),
+   fetch completed traces from Phoenix and extract final answers directly.
+
+   ~evaluate.py phoenix --config_path=config.yaml --n_traces=10~
+
+   Uses ~traces_endpoint~, ~traces_project~, and ~dataset.path~ from the
+   config YAML.
+
+*** Phoenix span schema (verified)
+
+    Tested against local Phoenix at ~http://localhost:6006~.
+
+    - ~from phoenix.client import Client~ / ~Client(base_url=...)~
+      (~arize-phoenix-client~ package, already added)
+    - ~client.spans.get_spans_dataframe(project_name=..., root_spans_only=True, limit=N)~
+    - Root spans have ~name='RLM.forward'~, ~span_kind='CHAIN'~
+    - Columns: ~attributes.input.value~, ~attributes.output.value~, ~status_code~, ~start_time~, etc.
+    - ~status_code~: ~'OK'~ for completed, ~'ERROR'~ for failed (filter these out)
+    - Input is JSON: ~{"input_args": {"context": "...", "query": "..."}}~
+      - Does NOT contain dataset row ~id~ -- must match by query text
+    - Output is JSON list: ~["Prediction(\n    answer='...VALUE...',\n    trajectory=[...])", [...]]~
+      - ~parsed[0]~ is the Prediction repr string
+      - Answer extraction: split on ~"',\n    trajectory="~, strip ~"Prediction(\n    answer='"~ prefix
+      - Answers may have ~[Answer]\n~ prefix from LongBench-Pro format leak -- strip it
+    - Matching to dataset: span's ~input_args.query~ corresponds to
+      ~question_nonthinking~ (via prompt template).  Try direct match first;
+      if no match, apply ~transform_question~ and retry (handles pre-transform
+      spans).  *HACK* -- this is fragile and depends on transform_question
+      being idempotent-ish.  Needs a systematic fix: either pass the row ~id~
+      through to spans (e.g. as span attribute or in input), or store a
+      lookup key in the dataset.
+    - Duplicates: multiple spans can match the same dataset row (retries);
+      group by matched ~question_nonthinking~, take the latest span per group
+
+*** Approach
+
+    1. Connect to Phoenix: ~Client(base_url=traces_endpoint)~
+    2. Fetch root spans: ~client.spans.get_spans_dataframe(project_name=..., root_spans_only=True, limit=N)~
+    3. Filter to ~status_code == 'OK'~ only
+    4. For each span, extract answer from ~attributes.output.value~ (parse JSON list, split Prediction repr)
+    5. Match to dataset row by comparing query text to ~question_nonthinking~ column
+    6. Deduplicate: keep most recent span per dataset row (by ~start_time~)
+    7. Evaluate using existing LongBench-Pro metric functions
+
+*** Dependencies
+
+    - [X] ~uv add arize-phoenix-client~ (already installed v1.31.0)
+
+*** Subtasks
+
+    - [X] Add ~fetch_predictions(phoenix_endpoint, project_name, n_traces, dataset_path)~
+      - Connect, fetch root spans, filter OK, extract answers, match to rows
+      - Return DataFrame with ~id~ and ~pred_answer~ columns
+    - [X] Add ~evaluate_phoenix(config_path, n_traces, show_errors)~ CLI command
+      - Read ~traces_endpoint~, ~traces_project~, ~dataset.path~ from config
+      - Call ~fetch_predictions~, then score with ~_score_predictions~
+    - [X] Investigate Phoenix span schema (see above)
+    - [X] Test on sample project (~dspy-sft-longbench-sample-opus~: 13 OK / 6 ERROR out of 19)
+    - [X] Report non-OK trace errors in evaluation output
+
+*** DONE Report non-OK trace errors in evaluation output
+
+    ~evaluate.py~ silently drops spans with ~status_code != "OK"~ via the
+    filter in ~fetch_predictions~. The ~status_message~ column from the
+    tracing backend contains error details (iteration limit exceeded,
+    timeout, parse errors, etc.) but this information is never surfaced.
+
+    For understanding model failure modes, it is important to know *why*
+    traces failed -- not just how many.
+
+    - [X] In ~fetch_predictions~, collect non-OK spans and their
+      ~status_message~ values
+    - [X] Print a summary of error counts grouped by error type/message
+      (always, not gated by ~--show_errors~)
+    - [X] When ~--show_errors~ is set, print individual error details
+      (span id, query snippet, status_message)
+    - [X] Include error breakdown in ~--output_metrics~ JSON report
+
+*** Metric mapping (~secondary_task~ -> metric)
+
+    Existing metrics in ~evaluate.py~ (already implemented):
+
+    | secondary_task | Metric            | Description                                          |
+    |----------------+-------------------+------------------------------------------------------|
+    | T1.1, T1.2     | NDCG              | Ranking quality; gold positions = relevance scores    |
+    | T2.1, T2.2     | Pairwise_Accuracy | Fraction of item pairs in correct relative order      |
+    | T3.1, T3.2     | Accuracy          | Exact match on first element only                    |
+    | T4.1, T4.2     | Summary           | 0.5*SemSim + 0.5*ROUGE-L (stub, needs embedding)    |
+    | T5.1, T5.2     | F1_Score          | Set-level F1 over answer elements                    |
+    | T6.1           | SubEM             | Fraction of gold elements present in prediction      |
+    | T6.2           | F1_Score          | Set-level F1                                         |
+    | T6.3           | Pairwise_Accuracy | Pair ordering                                        |
+    | T7.1-T7.3      | F1_Score          | Set-level F1                                         |
+    | T8.1-T8.3      | SubEM             | Subset exact match                                   |
+    | T9.1, T9.2     | F1_Score          | Set-level F1                                         |
+    | T10.1, T10.2   | SubEM             | Subset exact match                                   |
+    | T11.1, T11.2   | Accuracy          | Exact match on first element                         |
+
+** DONE Filter dataset by context length via config
+   :PROPERTIES:
+   :CLOSED: <2026-03-10>
+   :END:
+
+   Add optional ~dataset.token_lengths~ list to config YAML to restrict
+   which context sizes to include (e.g. ~["8k", "16k", "32k"]~).
+   When omitted, include all sizes.  Apply filter in ~load_dataset~
+   before building examples.
+
+   Available values: 8k, 16k, 32k, 64k, 128k, 256k.
+
+** DONE Stratify evals by context length and difficulty
+   :PROPERTIES:
+   :CLOSED: <2026-03-10>
+   :END:
+
+   LongBench-Pro has ~token_length~ (8k, 16k, 32k, 64k, 128k, 256k) and
+   ~difficulty~ (Easy, Moderate, Hard, Extreme) columns.  Add per-dimension
+   score breakdowns to ~_score_predictions~ output.
+
+** DONE Export eval results to JSON via ~--output_metrics~
+   :PROPERTIES:
+   :CLOSED: <2026-03-10>
+   :END:
+
+   Add ~--output_metrics=path.json~ flag to ~evaluate~ and ~evaluate_phoenix~.
+   Writes a JSON file with two top-level keys:
+   - ~summary~: aggregated scores (per-task, per-metric, per-length,
+     per-difficulty, overall) -- same info currently printed to stdout
+   - ~examples~: per-row results (~id~, ~task~, ~metric~, ~score~,
+     ~gold_answer~, ~pred_answer~)
+
+*** Pydantic models (in ~config_model.py~)
+
+    Define the JSON output shape as composable Pydantic models.  These
+    serve as both validation and serialization -- ~.model_dump()~ gives
+    us the JSON directly.
+
+    1. ~GroupStats~ -- reusable stats for any grouping dimension:
+       - ~avg: float~
+       - ~n: int~
+
+    2. ~ScoredExample~ -- one scored row:
+       - ~id: str~
+       - ~task: str~ (task code, e.g. "T1.1")
+       - ~metric: str~ (metric function name, e.g. "f1_score")
+       - ~score: float~
+       - ~gold_answer: list[str]~
+       - ~pred_answer: list[str]~
+       - ~token_length: Optional[str]~ (present if dataset has it)
+       - ~difficulty: Optional[str]~ (present if dataset has it)
+
+    3. ~EvalSummary~ -- aggregated scores across dimensions:
+       - ~per_task: dict[str, GroupStats]~
+       - ~per_metric: dict[str, GroupStats]~
+       - ~per_length: Optional[dict[str, GroupStats]]~
+       - ~per_difficulty: Optional[dict[str, GroupStats]]~
+       - ~overall: GroupStats~
+       - ~skipped: int~
+
+    4. ~EvalReport~ -- top-level output written to JSON:
+       - ~summary: EvalSummary~
+       - ~examples: list[ScoredExample]~
+
+*** Helpers in ~evaluate.py~
+
+    1. ~_score_row(row) -> ScoredExample | None~ -- scores a single
+       merged DataFrame row.  Returns ~None~ if no metric or NaN score.
+    2. ~_aggregate(results: list[ScoredExample]) -> EvalSummary~ --
+       groups scores by task/metric/length/difficulty, builds
+       ~GroupStats~ per group.
+    3. ~_print_summary(summary: EvalSummary, results, show_errors)~ --
+       prints to stdout (same output as today, reads from model fields).
+    4. ~_score_predictions~ becomes orchestrator: merge, loop with
+       ~_score_row~, call ~_aggregate~ and ~_print_summary~, then if
+       ~output_metrics~ is set, build ~EvalReport~ and write
+       ~.model_dump()~ as JSON.
+
+*** Subtasks
+
+    - [X] Add ~GroupStats~, ~ScoredExample~, ~EvalSummary~, ~EvalReport~ to ~config_model.py~
+    - [X] Add ~_score_row~, ~_aggregate~, ~_print_summary~ helpers to ~evaluate.py~
+    - [X] Refactor ~_score_predictions~ to use them
+    - [X] Add ~output_metrics~ param to ~_score_predictions~, ~evaluate~, ~evaluate_phoenix~
+
+** TODO Clean up trace-to-dataset matching in ~fetch_predictions~
+   :PROPERTIES:
+   :CREATED: <2026-03-17>
+   :END:
+
+   ~fetch_predictions~ in ~evaluate.py~ has two problems:
+
+   1. *Legacy fallback code*: after the direct
+      ~question_to_row.get(query)~ lookup, there are two fallback paths
+      that apply ~transform_question~ in various directions (lines
+      335-341).  These were needed when some Phoenix spans predated the
+      parquet being regenerated with ~transform_question~ applied.  All
+      current runs use the already-transformed parquet, so the direct
+      match always succeeds.  The fallback code is dead weight that
+      makes the matching logic look fragile and harder to reason about.
+
+   2. *Conflated error counter*: the ~unmatched~ counter (and the
+      ~Warning: N spans could not be matched~ message) lumps together
+      two different failure modes:
+      - Actual query mismatches (query text not found in parquet)
+      - Output parse failures (~_extract_answer_from_prediction_repr~
+        raises on spans where RLM never called ~SUBMIT~)
+      This is misleading -- the 7 "unmatched" spans in the
+      ~dspy-sft-longbench-qwen4b~ project are all output parse
+      failures, not query mismatches.
+
+*** Subtasks
+
+    - [ ] Remove ~transform_question~ fallback paths from ~fetch_predictions~
+          (keep only the direct ~question_to_row.get(query)~ lookup)
+    - [ ] Remove the ~transformed_to_row~ dict construction
+    - [ ] Remove the ~from data_utils import transform_question~ import
+    - [ ] Split ~unmatched~ into two counters: ~query_mismatches~ and
+          ~parse_failures~, with separate warning messages
+    - [ ] Consider scoring parse failures as 0 instead of dropping them
+
+** DONE Compare evaluation results across models
+   :PROPERTIES:
+   :CREATED: <2026-03-10>
+   :CLOSED:  <2026-04-15>
+   :END:
+
+   Current eval pipeline has survivorship bias: ~fetch_predictions~ drops
+   ERROR traces, and ~_score_predictions~ does an inner join -- so failed
+   attempts are invisible.  A model that fails on hard problems but aces
+   easy ones looks better than one that attempts everything.
+
+   Create ~compare_evals.py~ that does an outer join across two (or more)
+   eval result JSONs to give a fair comparison.
+
+*** Inputs
+
+    - Two or more ~--output_metrics~ JSON files (from ~evaluate.py~)
+    - The dataset parquet (for total problem count and metadata)
+
+*** Output
+
+    For each pair of models, report:
+
+    1. *Completion matrix* -- which problems each model scored vs missed:
+       - Both scored: N
+       - Only model A scored: N (model B failed/not attempted)
+       - Only model B scored: N (model A failed/not attempted)
+       - Neither scored: N
+
+    2. *Head-to-head on shared problems* (both scored):
+       - Model A wins / ties / Model B wins (by score)
+       - Average score per model (on the shared subset only)
+       - Per-task breakdown
+
+    3. *Adjusted overall scores* -- treat missing predictions as score=0:
+       - adjusted_avg = sum(scores) / total_dataset_size
+       - This penalizes models that fail to produce answers
+
+    4. *Per-dimension breakdowns* (token_length, difficulty) with
+       adjusted scores
+
+*** Approach
+
+    1. Load each metrics JSON: build ~{id: ScoredExample}~ dict per model
+    2. Load dataset parquet: get full set of IDs + metadata
+    3. Outer join on ID across models
+    4. Categorize each ID: scored-by-which-models
+    5. Compute head-to-head stats on intersection
+    6. Compute adjusted scores using dataset size as denominator
+    7. Print comparison table; optionally write to JSON
+
+*** Subtasks
+
+    - [X] Create ~compare_evals.py~ with fire CLI
+    - [X] Implement ~load_eval_results(metrics_json) -> dict[id, ScoredExample]~
+    - [X] Implement ~build_comparison(results_a, results_b, dataset_df)~
+      - Outer join, categorize, compute stats
+    - [X] Implement adjusted scoring (missing = 0)
+    - [X] Print comparison summary table
+    - [X] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
+
+** TODO Categorize failures in eval pipeline
+   :PROPERTIES:
+   :CREATED: <2026-03-10>
+   :END:
+
+   Currently ~fetch_predictions~ discards all ERROR traces and the
+   metrics JSON only contains successfully scored examples.  When
+   comparing models we need to know not just "how many failed" but
+   *why* they failed -- timeout vs parse error vs server crash vs
+   RLM max iterations exhausted.
+
+*** Failure types to distinguish
+
+    | Type            | Source                                    | How to detect                                                   |
+    |-----------------+-------------------------------------------+-----------------------------------------------------------------|
+    | timeout         | litellm.Timeout / httpx.ReadTimeout       | ERROR span, error message contains "timeout" or "timed out"     |
+    | server_error    | HTTP 500, connection refused, OOM          | ERROR span, error message contains HTTP status or connection err |
+    | max_iterations  | RLM hit 20 iterations without SUBMIT      | OK span (extract fallback runs), but has Predict.forward child  |
+    | parse_error     | DSPy adapter couldn't parse LLM output    | ERROR span, error message contains "AdapterParseError"          |
+    | not_attempted   | Example not in traces at all              | No matching trace for this dataset ID                           |
+
+*** Changes to ~evaluate.py~
+
+    1. ~fetch_predictions~ gains a ~fetch_failures=True~ parameter
+       - Also fetches ~status_code == 'ERROR'~ root spans
+       - Matches them to dataset rows (same query-text matching)
+       - Categorizes each by error message pattern matching
+       - Returns failures as a separate DataFrame or dict
+
+    2. New Pydantic models in ~config_model.py~:
+       - ~FailureCounts~: ~timeout: int~, ~server_error: int~,
+         ~parse_error: int~, ~max_iterations: int~, ~not_attempted: int~
+       - Add ~failures: Optional[FailureCounts]~ to ~EvalReport~
+
+    3. ~evaluate_phoenix~ populates ~failures~ in the output JSON
+
+*** Changes to ~compare_evals.py~
+
+    When failure data is present in both metrics JSONs, show a
+    breakdown in the completion matrix:
+
+    #+BEGIN_EXAMPLE
+    === Failure breakdown: model_a vs model_b ===
+                   model_a    model_b
+    Scored:            182         20
+    Timeout:             3          1
+    Server error:        0          2
+    Max iterations:      5          3
+    Parse error:         2          1
+    Not attempted:     558        723
+    Total:             750        750
+    #+END_EXAMPLE
+
+*** Subtasks
+
+    - [ ] Investigate Phoenix ERROR span format (error message field)
+    - [ ] Add ~FailureCounts~ to ~config_model.py~
+    - [ ] Add failure fetching + categorization to ~fetch_predictions~
+    - [ ] Include ~failures~ in ~EvalReport~ JSON output
+    - [ ] Update ~compare_evals.py~ to show failure breakdown
+    - [ ] Test with ~dspy-sft-longbench-finetuned-qwen4b~ project
+          (has 9 ERROR spans to categorize)
 
 * RLM error handling
 
@@ -1257,6 +1255,58 @@ deep at the LM endpoint instead of as an actionable REPL observation.
 The model packs a single ~llm_query~ prompt past the sub-LM context
 window; the request fails with a hard token-limit error from the
 backend.  Prevention lives at prompt-construction time, not retry.
+
+*** DONE Move RLM prompt construction into prompts.py
+    :PROPERTIES:
+    :CLOSED: <2026-04-15>
+    :END:
+
+   ~CustomizableRLM~ builds the action instructions in three places today:
+   upstream's ~ACTION_INSTRUCTIONS_TEMPLATE~, our ~_patch_instructions~
+   (regex substitution of the capacity figure), and ~_inject_tips~
+   (appended tip blocks).  Consolidate this into a single builder function
+   in ~prompts.py~ and delete the post-init signature-mutation logic from
+   ~customizable_rlm.py~.
+
+**** Approach
+
+    Add to ~prompts.py~:
+
+    #+BEGIN_SRC python
+    def build_action_instructions(
+        sub_lm_context_chars: int,
+        *,
+        small_model_tips: bool = False,
+    ) -> str:
+        """Capacity-figure-substituted action template, optionally with
+        small-model tips appended."""
+        ...
+    #+END_SRC
+
+    The function does the ~~500K char capacity~ substitution and, when
+    ~small_model_tips=True~, appends the two tip blocks (context-length
+    warning at <=100k chars, batching block at <=200k chars).
+    ~CustomizableRLM._build_signatures~ (the override added in the field-
+    description fix task below) calls this builder once and passes the
+    result straight to ~dspy.Signature~ -- no post-init mutation.
+
+**** Subtasks
+
+    - [X] Add ~build_action_instructions~ in ~prompts.py~ (single
+          ~.format()~ call; capacity figure and tips block wired in via
+          ~{capacity_chars_k}~ and ~{small_model_tips_block}~ placeholders
+          on the local copy of the template -- no post-hoc substitution)
+    - [X] Move the capacity-figure substitution logic into it
+    - [X] Move both tip blocks into ~prompts.CONTEXT_LENGTH_TIP~ and
+          ~prompts.BATCHING_TIP~ constants
+    - [X] Delete ~_patch_instructions~, ~_inject_tips~, and the
+          ~self._patch_instructions()~ call from ~customizable_rlm.py~;
+          replaced by an override of ~_build_signatures~ that calls
+          ~build_action_instructions~
+    - [X] Repoint ~TestPromptPatching~ tests in
+          ~test_customizable_rlm.py~ at ~build_action_instructions~
+          directly (no full ~CustomizableRLM~ construction)
+    - [X] All 15 tests in ~test_customizable_rlm.py~ pass
 
 *** TODO Add count_tokens tool and surface sub-LM token budget in llm_query guidance
 
