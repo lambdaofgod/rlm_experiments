@@ -161,6 +161,17 @@ class CustomizableRLM(RLM):
 
         return action_sig, extract_sig
 
+    def _no_fallback_adapter(self) -> ChatAdapter:
+        """Construct a ChatAdapter (or subclass) with JSONAdapter fallback disabled.
+
+        Preserves the currently configured adapter class so a globally
+        configured FenceTolerantChatAdapter still gets fence recovery on
+        the generate_action path, not just on the extract path.
+        """
+        current = dspy.settings.adapter
+        cls = type(current) if isinstance(current, ChatAdapter) else ChatAdapter
+        return cls(use_json_adapter_fallback=False)
+
     def _generate_action_no_fallback(self, **kwargs) -> Prediction:
         """Call generate_action with JSONAdapter fallback disabled.
 
@@ -168,9 +179,8 @@ class CustomizableRLM(RLM):
         code), builds a stub Prediction with code="" so the iteration can
         continue without an expensive JSONAdapter retry.
         """
-        no_fallback_adapter = ChatAdapter(use_json_adapter_fallback=False)
         try:
-            with dspy.settings.context(adapter=no_fallback_adapter):
+            with dspy.settings.context(adapter=self._no_fallback_adapter()):
                 return self.generate_action(**kwargs)
         except AdapterParseError as e:
             reasoning = ""
@@ -184,9 +194,8 @@ class CustomizableRLM(RLM):
 
     async def _agenerate_action_no_fallback(self, **kwargs) -> Prediction:
         """Async version of _generate_action_no_fallback."""
-        no_fallback_adapter = ChatAdapter(use_json_adapter_fallback=False)
         try:
-            with dspy.settings.context(adapter=no_fallback_adapter):
+            with dspy.settings.context(adapter=self._no_fallback_adapter()):
                 return await self.generate_action.acall(**kwargs)
         except AdapterParseError as e:
             reasoning = ""

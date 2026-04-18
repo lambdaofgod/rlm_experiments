@@ -1691,3 +1691,95 @@ when prevention fails (#2).
           and will be stripped." -- no more "use markdown code block
           format" nudge
 
+*** TODO Fix ChatAdapter dropping code field when sub-LM emits ```python fence without [[ ## code ## ]] marker
+
+   When the sub-LM produces reasoning followed by a markdown fence
+   (```python ... ```) without the ~[[ ## code ## ]]~ section marker,
+   ~ChatAdapter.parse~ (chat_adapter.py:212-247) sees only the
+   ~reasoning~ section, compares ~fields.keys()~ to
+   ~signature.output_fields.keys()~ (line 239), finds ~code~ missing,
+   and raises ~AdapterParseError~.  The field-description fix (task
+   above) did not eliminate this pattern:
+   v1-dspy-sft-train-data-longbench-qwen397b shows 67 / 67 unique
+   parse failures with this exact shape, and
+   v1-dspy-longbench-qwen4b-baseline shows 8 / 12.  Existing
+   mitigations do not solve it: the DONE ~AdapterParseError~ catch
+   sets ~code=""~ and wastes the iteration, while the
+   field-description tweak only lowers the rate, not the count.
+
+**** Why a parser override is the right fix
+
+    The LM did output the code; it's just inside a ```python fence
+    rather than after the ~[[ ## code ## ]]~ marker.
+    ~_strip_code_fences~ (upstream ~dspy/predict/rlm.py~, called at
+    line 475) already strips fences from the ~code~ field post-parse
+    -- but only if ~parse~ succeeded in extracting the field in the
+    first place.  Teaching ~parse~ to fall back to fence-extraction
+    when the ~code~ marker is absent lets us reuse the captured code
+    instead of burning the iteration.
+
+**** Key locations
+
+    - ~ChatAdapter.parse~: ~dspy/adapters/chat_adapter.py:212-247~
+      - Splits completion by ~field_header_pattern~ (line 21)
+      - Raises ~AdapterParseError(parsed_result=fields)~ at line
+        239-245
+    - ~ChatAdapter.__call__~: ~chat_adapter.py:64-86~
+      - JSONAdapter fallback trips only if ~parse~ fails; not touched
+        by this change
+    - ~_strip_code_fences~: upstream ~dspy/predict/rlm.py~ -- reuse
+      its fence regex so fenced code produced via this override and
+      fenced code produced normally get handled identically
+
+**** Approach
+
+    1. New class ~FenceTolerantChatAdapter(ChatAdapter)~ in a local
+       ~adapters.py~ (or alongside ~CustomizableRLM~).
+    2. Override ~parse~: call ~super().parse(signature, completion)~;
+       on ~AdapterParseError~, inspect ~error.parsed_result~:
+       - if the only missing output field is ~code~, scan
+         ~completion~ for a ```python ... ``` fence (or any ```
+         fence if no language tag), extract its contents, inject as
+         ~code~, return the combined dict
+       - otherwise re-raise
+       Scope is intentionally narrow: only ~code~ is filled from a
+       fence, never ~answer~ or any other field.  The
+       ~answer~-missing cases we observed (2 of 12 on qwen4b) don't
+       have a fenced payload we can safely lift into the field.
+    3. Wire it via ~dspy.configure(adapter=FenceTolerantChatAdapter())~
+       in ~collect_sft_data.py~, enabled by default.
+    4. Add a config field to disable it:
+       ~collection.fence_tolerant_adapter: bool = True~ (in
+       ~CollectionConfig~, ~config_model.py~).  When ~False~, fall
+       back to the stock ~ChatAdapter~.  Interaction with the
+       separate ~adapter: "json"~ switch (task at line 484, not yet
+       implemented): if ~adapter == "json"~ is set, it wins and the
+       fence-tolerant wrapper is skipped.
+    5. Emit a ~logger.warning~ when the fallback path triggers so the
+       recovery rate is visible in logs / traces.
+
+**** Subtasks
+
+    - [X] Add ~FenceTolerantChatAdapter~ with overridden ~parse~
+          (~code~-only fill) -- ~adapters.py~
+    - [X] Match the fence-extraction regex to ~_strip_code_fences~ so
+          semantics align -- same structure, non-anchored so it can
+          match a fence embedded in a larger body; ~group(1)~ returns
+          just the fence body so the downstream ~_strip_code_fences~
+          no-ops
+    - [X] Add ~fence_tolerant_adapter: bool = True~ to
+          ~CollectionConfig~ in ~config_model.py~
+    - [X] Wire it into ~collect_sft_data.py~ (default on, respects
+          the config flag; ~adapter == "json"~ switch does not exist
+          yet, will need coordination when task at line 484 lands).
+          ~CustomizableRLM._generate_action_no_fallback~ now preserves
+          the currently configured adapter class when disabling the
+          JSONAdapter fallback, so fence tolerance applies on the
+          generate_action path too, not only on extract.
+    - [X] Unit-test ~parse~ against the 3 failing LM-response shapes
+          captured in Phoenix: (a) reasoning + fence + ~[[ ##
+          completed ## ]]~, (b) reasoning + fence (no completed), (c)
+          reasoning + fence + duplicated markers -- ~test_adapters.py~
+    - [ ] Re-run one 397B trace that previously failed and confirm
+          the iteration completes with code extracted
+

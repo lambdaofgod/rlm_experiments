@@ -7,6 +7,7 @@ import fire
 import pandas as pd
 from tqdm import tqdm
 
+from adapters import FenceTolerantChatAdapter
 from config_model import load_config
 from tracing_backend import INPUT_VALUE, NAME, STATUS_CODE, make_tracing_backend
 
@@ -132,7 +133,10 @@ def main(config_path="config.yaml", rerun_all=False):
     if cfg.lm.timeout:
         lm_kwargs["timeout"] = cfg.lm.timeout
     lm = dspy.LM(cfg.lm.model, max_tokens=cfg.lm.max_tokens, **lm_kwargs)
-    dspy.configure(lm=lm)
+    configure_kwargs = {"lm": lm}
+    if cfg.collection.fence_tolerant_adapter:
+        configure_kwargs["adapter"] = FenceTolerantChatAdapter()
+    dspy.configure(**configure_kwargs)
 
     trainset = load_dataset(
         cfg.dataset.path,

@@ -46,6 +46,7 @@ class CollectionConfig(BaseModel):
     num_threads: int = 1
     metric: MetricName = "exact_match"
     output_dir: str = "./sft_data"
+    fence_tolerant_adapter: bool = True
 
 
 class Config(BaseModel):

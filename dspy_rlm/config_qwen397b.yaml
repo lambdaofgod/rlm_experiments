@@ -1,5 +1,6 @@
+traces_backend: "phoenix"
 traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "dspy-sft-longbench-qwen397b"
+traces_project: "v1-dspy-sft-train-data-longbench-qwen397b"
 
 lm:
   model: "openrouter/qwen/qwen3.5-397B-A17B"
@@ -7,6 +8,7 @@ lm:
 dataset:
   path: "longbench_pro_en.parquet"
   label_field: "answer"
+  token_lengths: ["8k"]
   prompt_template:
     context: "{context}"
     query: "{question_nonthinking}"
