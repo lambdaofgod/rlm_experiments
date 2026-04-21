@@ -6,10 +6,12 @@ Uses the correct metric per secondary_task as defined by LongBench-Pro.
 import json
 import math
 import re
+import time
 from collections import defaultdict
 
 import fire
 import pandas as pd
+from phoenix.client import Client
 
 from config_model import ErrorInfo, ErrorSummary, EvalReport, EvalSummary, GroupStats, ScoredExample, load_config
 from data_utils import build_question_lookup, match_question_to_row
@@ -296,7 +298,10 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
 
     Returns (predictions_df, error_summary_or_none).
     """
+    print(f"Fetching root spans from {project_name!r} (limit={limit})...", flush=True)
+    t0 = time.monotonic()
     spans_df = backend.get_root_spans(project_name, limit=limit)
+    print(f"  fetched {len(spans_df)} spans in {time.monotonic() - t0:.1f}s")
 
     # Filter to module forward spans
     forward_name = f"{module_type}.forward"
@@ -310,15 +315,15 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
 
     # Load dataset and build lookup tables
     dataset = pd.read_parquet(dataset_path)
-    question_to_row, transformed_to_row = build_question_lookup(dataset)
+    question_to_row = build_question_lookup(dataset)
 
     results = []
     unmatched = 0
-    for _, span in ok_spans.iterrows():
+    for span_id, span in ok_spans.iterrows():
         input_data = json.loads(span[INPUT_VALUE])
         query = input_data["input_args"]["query"]
 
-        matched_row = match_question_to_row(query, question_to_row, transformed_to_row)
+        matched_row = match_question_to_row(query, question_to_row)
         if matched_row is None:
             unmatched += 1
             continue
@@ -331,9 +336,10 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
 
         results.append({
             "id": matched_row["id"],
-            "question_nonthinking": matched_row["question_nonthinking"],
+            "question_thinking": matched_row["question_thinking"],
             "pred_answer": answer,
             "start_time": span[START_TIME],
+            "span_id": str(span_id),
         })
 
     if unmatched:
@@ -341,7 +347,7 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
 
     if not results:
         print("No predictions matched!")
-        return pd.DataFrame(columns=["id", "pred_answer"]), error_summary
+        return pd.DataFrame(columns=["id", "pred_answer", "span_id"]), error_summary
 
     df = pd.DataFrame(results)
 
@@ -349,7 +355,7 @@ def fetch_predictions(backend, project_name, dataset_path, module_type, limit=10
     df = df.sort_values("start_time").groupby("id").last().reset_index()
     print(f"Matched {len(df)} unique predictions")
 
-    return df[["id", "pred_answer"]], error_summary
+    return df[["id", "pred_answer", "span_id"]], error_summary
 
 
 def _score_row(row):
@@ -525,6 +531,47 @@ def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None,
             json.dump(report.model_dump(), f, indent=2)
         print(f"Metrics written to {output_metrics}")
 
+    return results
+
+
+def _build_annotation_rows(scored, df_pred):
+    """Pair scored examples with their root span_ids; shape rows for Phoenix."""
+    id_to_span = dict(zip(df_pred["id"], df_pred["span_id"]))
+    rows = []
+    for r in scored:
+        sid = id_to_span.get(r.id)
+        if not sid:
+            continue
+        rows.append({
+            "span_id": sid,
+            "score": r.score,
+            "explanation": f"gold={r.gold_answer}\npred={r.pred_answer}"[:2000],
+            "metadata": {
+                "task": r.task,
+                "metric": r.metric,
+                "difficulty": r.difficulty,
+                "token_length": r.token_length,
+            },
+        })
+    return rows
+
+
+def _log_phoenix_annotations(cfg, rows):
+    """Log span annotations to Phoenix."""
+    if not rows:
+        return
+    base_url = re.sub(r"/v1/traces/?$", "", cfg.traces_endpoint)
+    client = Client(base_url=base_url)
+    print(f"Logging {len(rows)} annotations to Phoenix ({cfg.traces_project!r})...", flush=True)
+    t0 = time.monotonic()
+    client.spans.log_span_annotations_dataframe(
+        dataframe=pd.DataFrame(rows),
+        annotation_name="longbench_score",
+        annotator_kind="LLM",
+        sync=True,
+    )
+    print(f"  logged in {time.monotonic() - t0:.1f}s")
+
 
 def evaluate(
     config_path=None,
@@ -543,6 +590,7 @@ def evaluate(
     - With --predictions_path: read predictions from a CSV/parquet file
     """
     error_summary = None
+    cfg = None
     if config_path:
         cfg = load_config(config_path)
         backend = make_tracing_backend(cfg.traces_backend or "phoenix", cfg.traces_endpoint)
@@ -561,7 +609,11 @@ def evaluate(
         print("Error: provide --config_path (traces) or --predictions_path (file)")
         return
 
-    _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics, error_summary=error_summary)
+    scored = _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics, error_summary=error_summary)
+
+    if cfg is not None and (cfg.traces_backend or "phoenix") == "phoenix":
+        rows = _build_annotation_rows(scored, df_pred)
+        _log_phoenix_annotations(cfg, rows)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 traces_backend: "phoenix"
 traces_endpoint: "http://localhost:6006/v1/traces"
-traces_project: "v1.1-dspy-sft-train-data-longbench-qwen397b"
+traces_project: "v1.2-dspy-sft-train-data-longbench-qwen397b"
 
 lm:
   model: "openrouter/qwen/qwen3.5-397B-A17B"
@@ -11,7 +11,7 @@ dataset:
   token_lengths: ["8k", "16k"]
   prompt_template:
     context: "{context}"
-    query: "{question_nonthinking}"
+    query: "{question_thinking}"
 
 module:
   type: "CustomizableRLM"

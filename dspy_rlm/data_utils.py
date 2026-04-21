@@ -1,31 +1,23 @@
 """Utilities for preparing datasets for SFT data collection."""
 
 import json
-import re
 
 import fire
 from datasets import load_dataset as hf_load_dataset
 
 
+RLM_BRIDGE = (
+    "CRITICAL: we are working in RLM regime, which means instead of "
+    "using previous formatting guidance you should output your final "
+    "answer via the SUBMIT tool. Call SUBMIT(answer=[...]) with your "
+    "answer as a list of values, e.g. "
+    'SUBMIT(answer=["val1", "val2"]).'
+)
+
+
 def transform_question(text):
-    """Strip LongBench-Pro [Answer] format instructions and add SUBMIT hint."""
-    # Remove "Output example:" block and everything after it
-    # Handle case variations and full-width colon
-    text = re.split(r"\n*Output [Ee]xample[:\uff1a]", text, maxsplit=1)[0]
-
-    # Remove the "Output the "[Answer]" identifier first..." sentence
-    # Variations: missing spaces, different endings ("without any additional content",
-    # "without any other", "one per line", etc.)
-    text = re.sub(
-        r"""Output the\s*"\[Answer\]"\s*identifier\s*(?:first)?[^.]*\.""",
-        "",
-        text,
-        flags=re.DOTALL,
-    )
-
-    text = text.rstrip()
-    text += "\n\nReturn your answer as a list of values, e.g. SUBMIT(answer=[\"val1\", \"val2\"])."
-    return text
+    """Append the RLM bridge sentence; leave the rest of the prompt untouched."""
+    return text.rstrip() + "\n\n" + RLM_BRIDGE
 
 
 def prepare_longbench_pro(output_path="longbench_pro_en.parquet"):
@@ -37,7 +29,6 @@ def prepare_longbench_pro(output_path="longbench_pro_en.parquet"):
     en = ds.filter(lambda x: x["language"] == "English")
     df = en.to_pandas()
     df["answer"] = df["answer"].apply(lambda x: json.dumps(x.tolist() if hasattr(x, "tolist") else x))
-    df["question_nonthinking"] = df["question_nonthinking"].apply(transform_question)
     df["question_thinking"] = df["question_thinking"].apply(transform_question)
     df.to_parquet(output_path, index=False)
     print(f"Saved {len(df)} English rows to {output_path}")
@@ -58,43 +49,13 @@ def sample_longbench_pro(input_path="longbench_pro_en.parquet", output_path="sam
 
 
 def build_question_lookup(dataset_df):
-    """Build lookup tables for matching query text to dataset rows.
-
-    Returns (question_to_row, transformed_to_row) where each maps
-    question text -> DataFrame row.
-    """
-    question_to_row = {}
-    for _, row in dataset_df.iterrows():
-        question_to_row[row["question_nonthinking"]] = row
-
-    transformed_to_row = {}
-    for _, row in dataset_df.iterrows():
-        transformed = transform_question(row["question_nonthinking"])
-        transformed_to_row[transformed] = row
-
-    return question_to_row, transformed_to_row
+    """Map post-transform question_thinking text -> DataFrame row."""
+    return {row["question_thinking"]: row for _, row in dataset_df.iterrows()}
 
 
-def match_question_to_row(query, question_to_row, transformed_to_row):
-    """Match a query string to a dataset row via question text.
-
-    Tries three strategies:
-    1. Direct match against question_nonthinking
-    2. Transform the query, then match against question_nonthinking
-    3. Match the raw query against pre-transformed questions
-
-    Returns the matched row or None.
-    """
-    matched_row = question_to_row.get(query)
-
-    if matched_row is None:
-        transformed_query = transform_question(query)
-        matched_row = question_to_row.get(transformed_query)
-
-    if matched_row is None:
-        matched_row = transformed_to_row.get(query)
-
-    return matched_row
+def match_question_to_row(query, question_to_row):
+    """Match a query string to a dataset row via question_thinking text."""
+    return question_to_row.get(query)
 
 
 if __name__ == "__main__":

@@ -701,6 +701,83 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [X] Test: run collection on sample dataset, then re-run and verify
           examples are skipped; re-run with ~--rerun_all~ and verify all run
 
+** TODO Fix ~transform_question~ swallowing the output-format hint
+   :PROPERTIES:
+   :CREATED: <2026-04-21>
+   :END:
+
+   Bug diagnosis in ~debugging.org~ under "~transform_question~ wipes
+   format hint, model gets no cue what to output".  The current regex
+   nukes the ~<FORMAT>~ description sitting between the ~[Answer]~
+   prefix and the "without any additional content" tail, so the model
+   is told to return a list with no cue what the list elements should
+   be.
+
+   New approach (not regex-surgery): leave the raw question fully
+   intact and append a bridge sentence that redirects the model from
+   the dataset's ~[Answer]~ / line-by-line format to our SUBMIT tool.
+   Also switch to ~question_thinking~ as the source column -- it
+   encourages step-by-step reasoning, and since the transform is now
+   purely additive, matching stays trivial.
+
+   Exact bridge wording:
+
+   #+BEGIN_EXAMPLE
+   CRITICAL: we are working in RLM regime, which means instead of
+   using previous formatting guidance you should output your final
+   answer via the SUBMIT tool. Call SUBMIT(answer=[...]) with your
+   answer as a list of values, e.g. SUBMIT(answer=["val1", "val2"]).
+   #+END_EXAMPLE
+
+   Because the transform becomes ~raw_text + "\n\n" + BRIDGE~,
+   trace-query matching collapses to a single dict keyed on the
+   post-transform ~question_thinking~ (current dual-table lookup in
+   ~data_utils.build_question_lookup~ exists only because the old
+   transform reshaped the middle of the sentence).
+
+   Existing Phoenix projects are frozen with the old prompts -- the
+   fix only affects future generation runs, so validation is a fresh
+   end-to-end rerun into a new project, not a re-eval of existing
+   traces.
+
+*** Subtasks
+
+    - [X] Define ~RLM_BRIDGE~ constant in ~data_utils.py~ with the
+          exact wording above
+    - [X] Rewrite ~transform_question~ to return
+          ~text.rstrip() + "\n\n" + RLM_BRIDGE~ (delete both regexes)
+    - [X] In ~prepare_longbench_pro~, drop the
+          ~question_nonthinking~ transform call; keep
+          ~question_thinking~ transform
+    - [X] Switch every config's ~prompt_template.query~ from
+          ~{question_nonthinking}~ to ~{question_thinking}~
+          (~local_phoenix_config.yaml~, ~config_qwen397b.yaml~,
+          ~local_base_config.yaml~, ~local_config.yaml~,
+          ~mlflow_config.yaml~, ~local_sample_config.yaml~,
+          ~sample_config.yaml~, ~config.yaml~, ~opus_sample_config.yaml~,
+          ~sample_config_short.yaml~, ~sample_config_qwen397b.yaml~,
+          ~sample_config_easy_medium.yaml~,
+          ~prompt_optimization/config.yaml~; also the five
+          ~debugging/~ configs and ~debugging_config.yaml~)
+    - [X] Collapse ~build_question_lookup~ to a single dict keyed on
+          ~question_thinking~; remove ~transformed_to_row~ and the
+          ~transform_question~ re-application
+    - [X] Simplify ~match_question_to_row~ to a one-line dict get
+    - [X] Update ~evaluate.py~ / ~debug_rlm.py~ / ~debug_matching.py~
+          references from ~question_nonthinking~ to ~question_thinking~
+    - [X] Regenerate the parquet:
+          ~uv run python data_utils.py longbench_pro~
+    - [ ] :REQUIRES_VALIDATION: User spot-checks 3-5 rows in the new
+          ~longbench_pro_en.parquet~ to confirm the transformed
+          ~question_thinking~ reads naturally (raw text intact, bridge
+          appended cleanly)
+    - [ ] Rerun generation via ~collect_sft_data.py~ into a new
+          Phoenix project (e.g. ~v1.2-dspy-longbench-qwen4b-baseline~)
+          so the old v1.1 traces stay intact for comparison
+    - [ ] Run ~evaluate.py~ on the new project and compare via
+          ~compare_evals.py~ against v1.1; pairwise-order and
+          segment-ID tasks are the main ones to watch
+
 * CustomizableRLM
 
 The local subclass of upstream ~dspy.RLM~ that adds the small-model
@@ -1104,6 +1181,85 @@ comparison.
     - [ ] Update ~compare_evals.py~ to show failure breakdown
     - [ ] Test with ~dspy-sft-longbench-finetuned-qwen4b~ project
           (has 9 ERROR spans to categorize)
+
+** TODO Log eval results to Phoenix as span annotations
+   :PROPERTIES:
+   :CREATED: <2026-04-21>
+   :END:
+
+   Right now ~evaluate.py~ writes a JSON report and prints tables,
+   but the scores are not visible in Phoenix alongside the traces
+   they were computed from.  SFT selection is done ad-hoc by joining
+   the JSON to the dataset parquet.  Logging each score as a Phoenix
+   annotation lets us filter traces in the UI by score and query
+   Phoenix directly for SFT selection ("give me spans where
+   ~longbench_score >= 0.8~ from project X").
+
+   Fires automatically when ~cfg.traces_backend~ is unset or
+   ~"phoenix"~.  No new CLI flag -- if the run used Phoenix for
+   tracing, it logs back to the same Phoenix.  MLflow backend skips
+   silently.
+
+*** Approach
+
+    1. Thread ~span_id~ through ~fetch_predictions~ ->
+       ~_score_predictions~ -> logger.  ~fetch_predictions~ already
+       iterates OK spans via ~iterrows~; bind the index (it is the
+       span_id) and include it in the returned DataFrame.
+    2. Make ~_score_predictions~ return the ~list[ScoredExample]~ so
+       ~evaluate()~ can feed it to the logger after the JSON/print
+       side-effects.
+    3. Add ~_build_annotation_rows(scored, df_pred)~ -- pure function
+       that pairs each scored example with its root span_id and
+       shapes the dicts for the Phoenix API.  Keeps the row-building
+       logic testable without a running Phoenix.
+    4. Add ~_log_phoenix_annotations(cfg, rows)~ -- constructs
+       ~phoenix.client.Client(base_url=cfg.traces_endpoint)~ and
+       calls ~client.spans.log_span_annotations_dataframe(...)~ with
+       ~annotation_name="longbench_score"~, ~annotator_kind="CODE"~,
+       ~sync=True~ so we get a confirmation count.
+    5. In the ~config_path~ branch of ~evaluate()~, after
+       ~_score_predictions~, log when backend is Phoenix.
+
+*** Annotation shape
+
+    One annotation per span; orthogonal dims go in ~metadata~.
+
+    #+BEGIN_EXAMPLE
+    {
+      "span_id": sid,
+      "score": r.score,
+      "explanation": f"gold={r.gold_answer}\npred={r.pred_answer}"[:2000],
+      "metadata": {
+        "task": r.task,
+        "metric": r.metric,
+        "difficulty": r.difficulty,
+        "token_length": r.token_length,
+      },
+    }
+    #+END_EXAMPLE
+
+    ~label~ intentionally left empty.  Phoenix convention: ~label~
+    and ~score~ both describe the value of the thing measured by
+    ~annotation_name~.  Our measurement is the continuous
+    LongBench-Pro score; task / difficulty / token_length are
+    properties of the input, not ratings of the score, so they live
+    in ~metadata~.
+
+*** Subtasks
+
+    - [X] Bind ~span_id~ in ~fetch_predictions~ iterrows, include in
+          returned DataFrame
+    - [X] Make ~_score_predictions~ return ~list[ScoredExample]~
+    - [X] Add ~_build_annotation_rows(scored, df_pred)~ helper
+    - [X] Add ~_log_phoenix_annotations(cfg, rows)~ helper with
+          top-of-file ~from phoenix.client import Client~
+    - [X] Gate the call in ~evaluate()~ on
+          ~(cfg.traces_backend or "phoenix") == "phoenix"~
+    - [ ] :REQUIRES_VALIDATION: Smoke-test against the synthetic
+          ~v1.1-dspy-longbench-qwen4b-baseline~ project first; verify
+          annotations render in the Phoenix UI and re-runs overwrite
+          (same ~annotation_name~ + ~span_id~) rather than append
 
 * RLM error handling
 

@@ -9,7 +9,7 @@ dataset:
   label_field: "answer"
   prompt_template:
     context: "{context}"
-    query: "{question_nonthinking}"
+    query: "{question_thinking}"
 
 module:
   type: "CustomizableRLM"

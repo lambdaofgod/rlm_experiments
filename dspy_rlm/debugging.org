@@ -538,3 +538,128 @@ triples via the adapter chain, so counts inflate).
   may indicate the host-side ~llm_query~ type-guard task landed between
   runs (worth checking ~git log~ before relying on it).
 
+* TODO ~transform_question~ wipes format hint, model gets no cue what to output
+:PROPERTIES:
+:CREATED:  <2026-04-21 Tue>
+:END:
+
+Surfaced while inspecting eval scores on the v1.1 runs: predictions on
+tasks like T5.1 / T6.3 / pairwise-order tasks were garbage even when
+the RLM call succeeded.  Digging into one concrete query revealed that
+~data_utils.transform_question~ (applied when building
+~longbench_pro_en.parquet~) strips the sentence that tells the model
+*what format to output*, along with the ~[Answer]~ boilerplate it was
+meant to remove.
+
+Only ~question_nonthinking~ matters -- it is the column actually fed to
+the RLM (~local_phoenix_config.yaml:17~ wires
+~query: "{question_nonthinking}"~; ~evaluate.py~,
+~data_utils.build_question_lookup~, and ~debug_rlm.py~ all match on
+~question_nonthinking~).  ~question_thinking~ is transformed in the
+parquet but never read operationally.
+
+** Concrete example
+
+Row id starting ~88d...~ (The Enchanted Typewriter, "II. MR. BOSWELL
+IMPARTS..." segment-ordering task).
+
+*Raw* ~question_nonthinking~ (from HuggingFace ~caskcsg/LongBench-Pro~):
+
+#+BEGIN_EXAMPLE
+The above text is the novel 'The Enchanted Typewriter', in which
+'II. MR. BOSWELL IMPARTS SOME Late NEWS OF HADES' is divided into 7
+segments. Please organize Jim Boswell's description of Hades' political
+changes and related events to the narrator, and arrange this statements
+in the correct causal and logical order. Output the "[Answer]"
+identifier first, and then output the sorted segment numbers line by
+line, without any additional content.
+
+Output example:
+[Answer]
+2
+1
+4
+3
+7
+5
+6
+#+END_EXAMPLE
+
+*Transformed* (what the RLM actually sees after
+~prepare_longbench_pro~):
+
+#+BEGIN_EXAMPLE
+The above text is the novel 'The Enchanted Typewriter', in which
+'II. MR. BOSWELL IMPARTS SOME Late NEWS OF HADES' is divided into 7
+segments. Please organize Jim Boswell's description of Hades' political
+changes and related events to the narrator, and arrange this statements
+in the correct causal and logical order.
+
+Return your answer as a list of values, e.g. SUBMIT(answer=["val1", "val2"]).
+#+END_EXAMPLE
+
+The format hint -- *"output the sorted segment numbers"* -- is gone.
+So is the ~Output example~ block with segment numbers 1-7.  The model is
+told to arrange "statements" in causal order and submit a list, but
+nowhere does the prompt say the elements of that list should be segment
+NUMBERS (1..7).  Predictions for this row came back as free-form text
+instead of ~["2", "1", "4", ...]~, which scores zero on
+~pairwise_accuracy~.
+
+** Root cause
+
+~data_utils.py:10~ ~transform_question~ has three steps:
+
+1. ~re.split(r"\n*Output [Ee]xample[:\uff1a]", ...)[0]~ -- strip the
+   ~Output example:~ block.  Correct behaviour (we do not want the
+   literal example leaking into the SUBMIT output).
+2. ~re.sub(r'Output the\s*"\[Answer\]"\s*identifier\s*(?:first)?[^.]*\.', '', text, flags=re.DOTALL)~
+   -- nuke the ~[Answer]~ directive sentence.  *This is the bug*: the
+   ~[^.]*\.~ tail greedily eats the whole sentence, including the
+   "output the ~<FORMAT>~ line by line" hint that sits between the
+   prefix and the trailing "~, without any additional content.~".
+3. Append ~Return your answer as a list of values, e.g. SUBMIT(...)~.
+
+Step 2 should leave the middle ("~output the <FORMAT>~") in place and
+only strip the procedural wrapper.
+
+** Scope
+
+- ~question_nonthinking~: affected.  All 750 rows where the raw
+  directive has the shape ~Output the "[Answer]" identifier first, and
+  then output the <FORMAT> line by line, without any additional
+  content.~ lose the ~<FORMAT>~ cue.  Needs re-inspection by task to
+  quantify, but the shape is prevalent in T2.x / T5.x / T6.x /
+  segment-ordering tasks.
+- ~question_thinking~: dead weight.  Also mis-transformed (an unrelated
+  variant leaks an intact ~output the "[Answer]"~ directive next to the
+  appended SUBMIT hint), but nothing in the pipeline reads it.
+- Downstream artefacts: ~longbench_pro_en.parquet~,
+  ~sample_longbench_pro_en.parquet~, any cached Phoenix traces produced
+  against these parquets.
+
+** Proposed fix
+
+Replace the single greedy regex (step 2 above) with two surgical
+substitutions that keep the middle of the sentence:
+
+#+BEGIN_SRC python
+# strip "Output the "[Answer]" identifier first, and then " prefix only
+text = re.sub(
+    r'Output the\s*["\u201c\u201d]\[Answer\]["\u201c\u201d]\s*identifier\s*first,?\s*and then\s+',
+    '',
+    text,
+)
+# strip ", without any additional content." tail (or "without any other")
+text = re.sub(
+    r',?\s*without any (?:additional content|other).*?\.',
+    '.',
+    text,
+)
+#+END_SRC
+
+After that the residue for the Enchanted Typewriter row reads "...and
+then *output the sorted segment numbers line by line.*" -- which,
+alongside the appended SUBMIT hint, tells the model *both* what (segment
+numbers) and how (SUBMIT list).
+

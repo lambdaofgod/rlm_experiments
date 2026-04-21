@@ -86,6 +86,33 @@ Matched 577/750 examples
 0.190 (n=533, skipped=44)
 
 Metrics written to evals/evals_local_v11.json
+** Detailed results
+:PROPERTIES:
+:CREATED:  <2026-04-21 Tue> [19:18]
+:END:
+
+#+BEGIN_SRC python :session eval_results.org  :exports both
+import pandas as pd
+import json
+
+with open("evals_local_v11.json") as f:
+    results_dict = json.load(f)
+    eval_df = pd.DataFrame.from_records(results_dict["examples"])
+
+eval_df.columns
+#+END_SRC
+
+#+RESULTS:
+: Index(['id', 'task', 'metric', 'score', 'gold_answer', 'pred_answer',
+:        'token_length', 'difficulty'],
+:       dtype='object')
+
+#+BEGIN_SRC python :session eval_results.org  :exports both
+eval_df[eval_df["score"] >= 0.99].shape
+#+END_SRC
+
+#+RESULTS:
+| 64 | 8 |
 
 * v1.1-dspy-sft-train-data-longbench-qwen397b
 :PROPERTIES:
@@ -171,6 +198,37 @@ Matched 236/750 examples
 
 Metrics written to evals/evals_qwen397b.json
 
+
+
+
+** Detailed results 
+:PROPERTIES:
+:CREATED:  <2026-04-21 Tue> [19:13]
+:END:
+
+#+BEGIN_SRC python :session eval_results.org  :exports both
+import pandas as pd
+import json
+
+with open("evals_qwen397b.json") as f:
+    results_dict = json.load(f)
+    eval_df = pd.DataFrame.from_records(results_dict["examples"])
+
+eval_df.columns
+#+END_SRC
+
+#+RESULTS:
+: Index(['id', 'task', 'metric', 'score', 'gold_answer', 'pred_answer',
+:        'token_length', 'difficulty'],
+:       dtype='object')
+
+#+BEGIN_SRC python :session eval_results.org  :exports both
+eval_df[eval_df["score"] >= 0.99].shape
+#+END_SRC
+
+#+RESULTS:
+| 67 | 8 |
+
 * Comparison: qwen397b vs qwen4b-baseline
 :PROPERTIES:
 :CREATED:  <2026-04-19 Sun>
@@ -212,56 +270,56 @@ Average on shared: evals_qwen397b=0.385, evals_local_v11=0.254
 
 *** Per-task breakdown: evals_qwen397b vs evals_local_v11
 
-| Task | evals_qwen397b | n_evals_qwen397b | evals_local_v11 | n_evals_local_v11 | delta |
-|------+------+--------+------+--------+-------|
-| T1.1 | 0.169 | 5 | 0.000 | 5 | +0.169 |
-| T1.2 | 0.172 | 5 | 0.172 | 5 | +0.000 |
-| T2.1 | 0.981 | 5 | 0.352 | 5 | +0.629 |
-| T2.2 | 0.000 | 3 | 0.000 | 3 | +0.000 |
-| T3.1 | 0.400 | 5 | 0.600 | 5 | -0.200 |
-| T3.2 | 0.200 | 5 | 0.200 | 5 | +0.000 |
-| T5.1 | 0.000 | 5 | 0.000 | 5 | +0.000 |
-| T5.2 | 0.800 | 5 | 0.200 | 5 | +0.600 |
-| T6.1 | 0.000 | 3 | 0.000 | 3 | +0.000 |
-| T6.2 | 0.583 | 4 | 0.498 | 4 | +0.086 |
-| T6.3 | 0.693 | 5 | 0.580 | 5 | +0.113 |
-| T7.1 | 0.000 | 5 | 0.000 | 5 | +0.000 |
-| T7.2 | 0.533 | 5 | 0.200 | 5 | +0.333 |
-| T7.3 | 0.000 | 2 | 0.000 | 2 | +0.000 |
-| T8.1 | 0.400 | 5 | 0.400 | 5 | +0.000 |
-| T8.2 | 0.200 | 5 | 0.400 | 5 | -0.200 |
-| T8.3 | 1.000 | 5 | 0.400 | 5 | +0.600 |
-| T9.1 | 0.500 | 4 | 0.000 | 4 | +0.500 |
-| T9.2 | 0.750 | 4 | 0.725 | 4 | +0.025 |
-| T10.1 | 0.400 | 5 | 0.200 | 5 | +0.200 |
-| T10.2 | 0.400 | 5 | 0.400 | 5 | +0.000 |
-| T11.1 | 0.000 | 4 | 0.000 | 4 | +0.000 |
-| T11.2 | 0.200 | 5 | 0.200 | 5 | +0.000 |
+| Task  | evals_qwen397b | n_evals_qwen397b | evals_local_v11 | n_evals_local_v11 |  delta |
+|-------+----------------+------------------+-----------------+-------------------+--------|
+| T1.1  |          0.169 |                5 |           0.000 |                 5 | +0.169 |
+| T1.2  |          0.172 |                5 |           0.172 |                 5 | +0.000 |
+| T2.1  |          0.981 |                5 |           0.352 |                 5 | +0.629 |
+| T2.2  |          0.000 |                3 |           0.000 |                 3 | +0.000 |
+| T3.1  |          0.400 |                5 |           0.600 |                 5 | -0.200 |
+| T3.2  |          0.200 |                5 |           0.200 |                 5 | +0.000 |
+| T5.1  |          0.000 |                5 |           0.000 |                 5 | +0.000 |
+| T5.2  |          0.800 |                5 |           0.200 |                 5 | +0.600 |
+| T6.1  |          0.000 |                3 |           0.000 |                 3 | +0.000 |
+| T6.2  |          0.583 |                4 |           0.498 |                 4 | +0.086 |
+| T6.3  |          0.693 |                5 |           0.580 |                 5 | +0.113 |
+| T7.1  |          0.000 |                5 |           0.000 |                 5 | +0.000 |
+| T7.2  |          0.533 |                5 |           0.200 |                 5 | +0.333 |
+| T7.3  |          0.000 |                2 |           0.000 |                 2 | +0.000 |
+| T8.1  |          0.400 |                5 |           0.400 |                 5 | +0.000 |
+| T8.2  |          0.200 |                5 |           0.400 |                 5 | -0.200 |
+| T8.3  |          1.000 |                5 |           0.400 |                 5 | +0.600 |
+| T9.1  |          0.500 |                4 |           0.000 |                 4 | +0.500 |
+| T9.2  |          0.750 |                4 |           0.725 |                 4 | +0.025 |
+| T10.1 |          0.400 |                5 |           0.200 |                 5 | +0.200 |
+| T10.2 |          0.400 |                5 |           0.400 |                 5 | +0.000 |
+| T11.1 |          0.000 |                4 |           0.000 |                 4 | +0.000 |
+| T11.2 |          0.200 |                5 |           0.200 |                 5 | +0.000 |
 
 ** Adjusted overall scores (750 total problems)
 
-| model | adjusted | scored | total | raw avg |
-|-------+----------+--------+-------+---------|
-| evals_qwen397b | 0.113 | 217 | 750 | 0.392 |
-| evals_local_v11 | 0.135 | 533 | 750 | 0.190 |
+| model           | adjusted | scored | total | raw avg |
+|-----------------+----------+--------+-------+---------|
+| evals_qwen397b  |    0.113 |    217 |   750 |   0.392 |
+| evals_local_v11 |    0.135 |    533 |   750 |   0.190 |
 
 ** Adjusted scores by token_length
 
 | token_length | evals_qwen397b adj | evals_qwen397b scored | evals_local_v11 adj | evals_local_v11 scored |
-|---+-----+-----+-----+-----|
-| 8k | 0.360 | 108/125 | 0.000 | 1/125 |
-| 16k | 0.321 | 106/125 | 0.221 | 105/125 |
-| 32k | 0.000 | 1/125 | 0.149 | 108/125 |
-| 64k | 0.000 | 2/125 | 0.130 | 111/125 |
-| 128k | 0.000 | 0/125 | 0.141 | 104/125 |
-| 256k | 0.000 | 0/125 | 0.170 | 104/125 |
+|--------------+--------------------+-----------------------+---------------------+------------------------|
+| 8k           |              0.360 | 108/125               |               0.000 | 1/125                  |
+| 16k          |              0.321 | 106/125               |               0.221 | 105/125                |
+| 32k          |              0.000 | 1/125                 |               0.149 | 108/125                |
+| 64k          |              0.000 | 2/125                 |               0.130 | 111/125                |
+| 128k         |              0.000 | 0/125                 |               0.141 | 104/125                |
+| 256k         |              0.000 | 0/125                 |               0.170 | 104/125                |
 
 ** Adjusted scores by difficulty
 
 | difficulty | evals_qwen397b adj | evals_qwen397b scored | evals_local_v11 adj | evals_local_v11 scored |
-|---+-----+-----+-----+-----|
-| Easy | 0.213 | 108/265 | 0.181 | 202/265 |
-| Moderate | 0.109 | 44/143 | 0.147 | 108/143 |
-| Hard | 0.079 | 32/132 | 0.135 | 100/132 |
-| Extreme | 0.013 | 33/210 | 0.069 | 123/210 |
+|------------+--------------------+-----------------------+---------------------+------------------------|
+| Easy       |              0.213 | 108/265               |               0.181 | 202/265                |
+| Moderate   |              0.109 | 44/143                |               0.147 | 108/143                |
+| Hard       |              0.079 | 32/132                |               0.135 | 100/132                |
+| Extreme    |              0.013 | 33/210                |               0.069 | 123/210                |
 
