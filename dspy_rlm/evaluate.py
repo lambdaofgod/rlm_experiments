@@ -405,78 +405,101 @@ def _aggregate(results, skipped):
     )
 
 
+def _org_cell(s):
+    """Escape a value for inclusion in an org-mode table cell."""
+    return str(s).replace("|", r"\vert{}").replace("\n", " ")
+
+
 def _print_error_summary(error_summary, show_errors):
-    """Print error breakdown from non-OK spans."""
+    """Print error breakdown from non-OK spans as org-mode."""
     if error_summary is None:
         return
 
     print()
-    print(f"Trace errors: {error_summary.total}")
-    print("-" * 60)
+    print(f"** Trace errors ({error_summary.total})")
+    print()
+    print("| count | message |")
+    print("|-------+---------|")
     for msg, count in sorted(error_summary.by_message.items(), key=lambda x: -x[1]):
-        # Truncate long messages for the summary line
         display_msg = msg if len(msg) <= 120 else msg[:117] + "..."
-        print(f"  {count:4d}x  {display_msg}")
+        print(f"| {count} | {_org_cell(display_msg)} |")
+    print()
 
     if show_errors and error_summary.errors:
+        print("*** Error details")
         print()
-        print("Error details:")
+        print("#+begin_example")
         for err in error_summary.errors:
             query_str = f" query={err.query_snippet!r}" if err.query_snippet else ""
-            print(f"  [{err.span_id[:12]}]{query_str}")
-            print(f"       {err.status_message}")
-    print()
+            print(f"[{err.span_id[:12]}]{query_str}")
+            print(f"     {err.status_message}")
+        print("#+end_example")
+        print()
 
 
 def _print_summary(summary, results, show_errors, error_summary=None):
-    """Print evaluation summary to stdout."""
+    """Print evaluation summary to stdout as org-mode."""
     _print_error_summary(error_summary, show_errors)
 
     if show_errors:
+        print("** Example errors")
+        print()
+        print("#+begin_example")
         for r in results:
             if r.score < 1.0:
-                print(f"  [{r.id[:12]}] {r.task} {r.metric}={r.score:.3f}")
-                print(f"       gold: {r.gold_answer}")
-                print(f"       pred: {r.pred_answer}")
+                print(f"[{r.id[:12]}] {r.task} {r.metric}={r.score:.3f}")
+                print(f"     gold: {r.gold_answer}")
+                print(f"     pred: {r.pred_answer}")
                 print()
+        print("#+end_example")
+        print()
 
-    print("=" * 60)
-    print("Per-task scores:")
-    print("-" * 60)
+    print("** Per-task scores")
+    print()
+    print("| Task | Metric | Score | n |")
+    print("|------+--------+-------+---|")
     for code, stats in summary.per_task.items():
         metric_name = get_metric(code).__name__
-        print(f"  {code:8s} ({metric_name:20s}): {stats.avg:.3f}  (n={stats.n})")
-
+        print(f"| {code} | {metric_name} | {stats.avg:.3f} | {stats.n} |")
     print()
-    print("Per-metric scores:")
-    print("-" * 60)
+
+    print("** Per-metric scores")
+    print()
+    print("| Metric | Score | n |")
+    print("|--------+-------+---|")
     for name, stats in summary.per_metric.items():
-        print(f"  {name:20s}: {stats.avg:.3f}  (n={stats.n})")
+        print(f"| {name} | {stats.avg:.3f} | {stats.n} |")
+    print()
 
     if summary.per_length:
+        print("** Per-context-length scores")
         print()
-        print("Per-context-length scores:")
-        print("-" * 60)
+        print("| Length | Score | n |")
+        print("|--------+-------+---|")
         for length in ["8k", "16k", "32k", "64k", "128k", "256k"]:
             if length in summary.per_length:
                 stats = summary.per_length[length]
-                print(f"  {length:8s}: {stats.avg:.3f}  (n={stats.n})")
+                print(f"| {length} | {stats.avg:.3f} | {stats.n} |")
+        print()
 
     if summary.per_difficulty:
+        print("** Per-difficulty scores")
         print()
-        print("Per-difficulty scores:")
-        print("-" * 60)
+        print("| Difficulty | Score | n |")
+        print("|------------+-------+---|")
         for diff in ["Easy", "Moderate", "Hard", "Extreme"]:
             if diff in summary.per_difficulty:
                 stats = summary.per_difficulty[diff]
-                print(f"  {diff:10s}: {stats.avg:.3f}  (n={stats.n})")
+                print(f"| {diff} | {stats.avg:.3f} | {stats.n} |")
+        print()
 
+    print("** Overall")
     print()
     if summary.overall.n:
-        print(f"Overall: {summary.overall.avg:.3f}  (n={summary.overall.n}, skipped={summary.skipped})")
+        print(f"{summary.overall.avg:.3f} (n={summary.overall.n}, skipped={summary.skipped})")
     else:
         print(f"No scores computed (skipped={summary.skipped})")
-    print("=" * 60)
+    print()
 
 
 def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None, error_summary=None):

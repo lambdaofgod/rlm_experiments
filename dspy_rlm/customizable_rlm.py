@@ -186,7 +186,7 @@ class CustomizableRLM(RLM):
             reasoning = ""
             if e.parsed_result and isinstance(e.parsed_result, dict):
                 reasoning = e.parsed_result.get("reasoning", "")
-            logger.warning(
+            logger.debug(
                 "ChatAdapter parsed reasoning but missed code field; "
                 "returning empty code instead of falling back to JSONAdapter"
             )
@@ -201,7 +201,7 @@ class CustomizableRLM(RLM):
             reasoning = ""
             if e.parsed_result and isinstance(e.parsed_result, dict):
                 reasoning = e.parsed_result.get("reasoning", "")
-            logger.warning(
+            logger.debug(
                 "ChatAdapter parsed reasoning but missed code field; "
                 "returning empty code instead of falling back to JSONAdapter"
             )

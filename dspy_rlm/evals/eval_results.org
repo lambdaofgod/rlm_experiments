@@ -1,0 +1,267 @@
+#+title: Eval Results
+
+* v1.1-dspy-longbench-qwen4b-baseline  
+:PROPERTIES:
+:CREATED:  <2026-04-19 Sun> [18:15]
+:END:
+
+#+BEGIN_SRC bash :results output raw
+cd ..; uv run python evaluate.py local_phoenix_config.yaml -o evals/evals_local_v11.json
+#+END_SRC
+
+#+RESULTS:
+Fetched 1282 root spans, 620 CustomizableRLM.forward, 597 OK, 23 errors
+Matched 577 unique predictions
+Matched 577/750 examples
+
+** Trace errors (23)
+
+| count | message |
+|-------+---------|
+| 12 | BrokenPipeError: [Errno 32] Broken pipe |
+| 6 | REPLTimeoutError: Code interpreter timed out after 300s |
+| 4 | Timeout: litellm.Timeout: APITimeoutError - Request timed out. Error_str: Request timed out. |
+| 1 | BadRequestError: litellm.BadRequestError: OpenAIException - request (41308 tokens) exceeds the available context size... |
+
+** Per-task scores
+
+| Task | Metric | Score | n |
+|------+--------+-------+---|
+| T1.1 | ndcg | 0.209 | 24 |
+| T1.2 | ndcg | 0.253 | 25 |
+| T10.1 | sub_em | 0.072 | 25 |
+| T10.2 | sub_em | 0.200 | 25 |
+| T11.1 | accuracy | 0.087 | 23 |
+| T11.2 | accuracy | 0.080 | 25 |
+| T2.1 | pairwise_accuracy | 0.505 | 24 |
+| T2.2 | pairwise_accuracy | 0.211 | 22 |
+| T3.1 | accuracy | 0.261 | 23 |
+| T3.2 | accuracy | 0.208 | 24 |
+| T5.1 | f1_score | 0.042 | 25 |
+| T5.2 | f1_score | 0.116 | 25 |
+| T6.1 | sub_em | 0.000 | 21 |
+| T6.2 | f1_score | 0.232 | 23 |
+| T6.3 | pairwise_accuracy | 0.717 | 25 |
+| T7.1 | f1_score | 0.000 | 16 |
+| T7.2 | f1_score | 0.102 | 24 |
+| T7.3 | f1_score | 0.027 | 13 |
+| T8.1 | sub_em | 0.120 | 25 |
+| T8.2 | sub_em | 0.240 | 25 |
+| T8.3 | sub_em | 0.120 | 25 |
+| T9.1 | f1_score | 0.075 | 22 |
+| T9.2 | f1_score | 0.322 | 24 |
+
+** Per-metric scores
+
+| Metric | Score | n |
+|--------+-------+---|
+| accuracy | 0.158 | 95 |
+| f1_score | 0.125 | 172 |
+| ndcg | 0.231 | 49 |
+| pairwise_accuracy | 0.489 | 71 |
+| sub_em | 0.129 | 146 |
+
+** Per-context-length scores
+
+| Length | Score | n |
+|--------+-------+---|
+| 8k | 0.000 | 1 |
+| 16k | 0.263 | 105 |
+| 32k | 0.173 | 108 |
+| 64k | 0.147 | 111 |
+| 128k | 0.169 | 104 |
+| 256k | 0.204 | 104 |
+
+** Per-difficulty scores
+
+| Difficulty | Score | n |
+|------------+-------+---|
+| Easy | 0.237 | 202 |
+| Moderate | 0.194 | 108 |
+| Hard | 0.179 | 100 |
+| Extreme | 0.118 | 123 |
+
+** Overall
+
+0.190 (n=533, skipped=44)
+
+Metrics written to evals/evals_local_v11.json
+
+* v1.1-dspy-sft-train-data-longbench-qwen397b
+:PROPERTIES:
+:CREATED:  <2026-04-19 Sun> [18:16]
+:END:
+
+#+BEGIN_SRC bash :results output raw
+cd ..; uv run python evaluate.py config_qwen397b.yaml -o evals/evals_qwen397b.json
+#+END_SRC
+
+#+RESULTS:
+Fetched 597 root spans, 259 CustomizableRLM.forward, 238 OK, 21 errors
+Matched 236 unique predictions
+Matched 236/750 examples
+
+** Trace errors (21)
+
+| count | message |
+|-------+---------|
+| 10 | BrokenPipeError: [Errno 32] Broken pipe |
+| 7 | AuthenticationError: litellm.AuthenticationError: AuthenticationError: OpenrouterException - {"error":{"message":"No ... |
+| 4 | AttributeError: 'NoneType' object has no attribute 'strip' |
+
+** Per-task scores
+
+| Task | Metric | Score | n |
+|------+--------+-------+---|
+| T1.1 | ndcg | 0.185 | 10 |
+| T1.2 | ndcg | 0.285 | 10 |
+| T10.1 | sub_em | 0.333 | 9 |
+| T10.2 | sub_em | 0.300 | 10 |
+| T11.1 | accuracy | 0.200 | 10 |
+| T11.2 | accuracy | 0.300 | 10 |
+| T2.1 | pairwise_accuracy | 0.940 | 10 |
+| T2.2 | pairwise_accuracy | 0.219 | 8 |
+| T3.1 | accuracy | 0.400 | 10 |
+| T3.2 | accuracy | 0.200 | 10 |
+| T5.1 | f1_score | 0.000 | 9 |
+| T5.2 | f1_score | 0.800 | 10 |
+| T6.1 | sub_em | 0.000 | 10 |
+| T6.2 | f1_score | 0.404 | 9 |
+| T6.3 | pairwise_accuracy | 0.847 | 10 |
+| T7.1 | f1_score | 0.000 | 9 |
+| T7.2 | f1_score | 0.392 | 9 |
+| T7.3 | f1_score | 0.000 | 4 |
+| T8.1 | sub_em | 0.300 | 10 |
+| T8.2 | sub_em | 0.400 | 10 |
+| T8.3 | sub_em | 0.900 | 10 |
+| T9.1 | f1_score | 0.658 | 10 |
+| T9.2 | f1_score | 0.600 | 10 |
+
+** Per-metric scores
+
+| Metric | Score | n |
+|--------+-------+---|
+| accuracy | 0.275 | 40 |
+| f1_score | 0.396 | 70 |
+| ndcg | 0.235 | 20 |
+| pairwise_accuracy | 0.701 | 28 |
+| sub_em | 0.373 | 59 |
+
+** Per-context-length scores
+
+| Length | Score | n |
+|--------+-------+---|
+| 8k | 0.416 | 108 |
+| 16k | 0.378 | 106 |
+| 32k | 0.000 | 1 |
+| 64k | 0.000 | 2 |
+
+** Per-difficulty scores
+
+| Difficulty | Score | n |
+|------------+-------+---|
+| Easy | 0.522 | 108 |
+| Moderate | 0.353 | 44 |
+| Hard | 0.327 | 32 |
+| Extreme | 0.083 | 33 |
+
+** Overall
+
+0.392 (n=217, skipped=19)
+
+Metrics written to evals/evals_qwen397b.json
+
+* Comparison: qwen397b vs qwen4b-baseline
+:PROPERTIES:
+:CREATED:  <2026-04-19 Sun>
+:END:
+
+#+BEGIN_SRC bash :results output raw
+cd ..; uv run python compare_evals.py evals/evals_qwen397b.json evals_local_v11.json
+#+END_SRC
+
+#+RESULTS:
+** Load summary
+
+Dataset: 750 problems
+
+| model | scored examples |
+|-------+-----------------|
+| evals_qwen397b | 217 |
+| evals_local_v11 | 533 |
+
+** Completion: evals_qwen397b vs evals_local_v11
+
+| bucket | n |
+|--------+---|
+| Both scored | 104 |
+| Only evals_qwen397b | 113 |
+| Only evals_local_v11 | 429 |
+| Neither scored | 104 |
+| Total | 750 |
+
+** Head-to-head: evals_qwen397b vs evals_local_v11 (104 shared)
+
+| outcome | n | pct |
+|---------+---+-----|
+| evals_qwen397b wins | 29 | 27.9% |
+| Ties | 65 | 62.5% |
+| evals_local_v11 wins | 10 | 9.6% |
+
+Average on shared: evals_qwen397b=0.385, evals_local_v11=0.254
+
+*** Per-task breakdown: evals_qwen397b vs evals_local_v11
+
+| Task | evals_qwen397b | n_evals_qwen397b | evals_local_v11 | n_evals_local_v11 | delta |
+|------+------+--------+------+--------+-------|
+| T1.1 | 0.169 | 5 | 0.000 | 5 | +0.169 |
+| T1.2 | 0.172 | 5 | 0.172 | 5 | +0.000 |
+| T2.1 | 0.981 | 5 | 0.352 | 5 | +0.629 |
+| T2.2 | 0.000 | 3 | 0.000 | 3 | +0.000 |
+| T3.1 | 0.400 | 5 | 0.600 | 5 | -0.200 |
+| T3.2 | 0.200 | 5 | 0.200 | 5 | +0.000 |
+| T5.1 | 0.000 | 5 | 0.000 | 5 | +0.000 |
+| T5.2 | 0.800 | 5 | 0.200 | 5 | +0.600 |
+| T6.1 | 0.000 | 3 | 0.000 | 3 | +0.000 |
+| T6.2 | 0.583 | 4 | 0.498 | 4 | +0.086 |
+| T6.3 | 0.693 | 5 | 0.580 | 5 | +0.113 |
+| T7.1 | 0.000 | 5 | 0.000 | 5 | +0.000 |
+| T7.2 | 0.533 | 5 | 0.200 | 5 | +0.333 |
+| T7.3 | 0.000 | 2 | 0.000 | 2 | +0.000 |
+| T8.1 | 0.400 | 5 | 0.400 | 5 | +0.000 |
+| T8.2 | 0.200 | 5 | 0.400 | 5 | -0.200 |
+| T8.3 | 1.000 | 5 | 0.400 | 5 | +0.600 |
+| T9.1 | 0.500 | 4 | 0.000 | 4 | +0.500 |
+| T9.2 | 0.750 | 4 | 0.725 | 4 | +0.025 |
+| T10.1 | 0.400 | 5 | 0.200 | 5 | +0.200 |
+| T10.2 | 0.400 | 5 | 0.400 | 5 | +0.000 |
+| T11.1 | 0.000 | 4 | 0.000 | 4 | +0.000 |
+| T11.2 | 0.200 | 5 | 0.200 | 5 | +0.000 |
+
+** Adjusted overall scores (750 total problems)
+
+| model | adjusted | scored | total | raw avg |
+|-------+----------+--------+-------+---------|
+| evals_qwen397b | 0.113 | 217 | 750 | 0.392 |
+| evals_local_v11 | 0.135 | 533 | 750 | 0.190 |
+
+** Adjusted scores by token_length
+
+| token_length | evals_qwen397b adj | evals_qwen397b scored | evals_local_v11 adj | evals_local_v11 scored |
+|---+-----+-----+-----+-----|
+| 8k | 0.360 | 108/125 | 0.000 | 1/125 |
+| 16k | 0.321 | 106/125 | 0.221 | 105/125 |
+| 32k | 0.000 | 1/125 | 0.149 | 108/125 |
+| 64k | 0.000 | 2/125 | 0.130 | 111/125 |
+| 128k | 0.000 | 0/125 | 0.141 | 104/125 |
+| 256k | 0.000 | 0/125 | 0.170 | 104/125 |
+
+** Adjusted scores by difficulty
+
+| difficulty | evals_qwen397b adj | evals_qwen397b scored | evals_local_v11 adj | evals_local_v11 scored |
+|---+-----+-----+-----+-----|
+| Easy | 0.213 | 108/265 | 0.181 | 202/265 |
+| Moderate | 0.109 | 44/143 | 0.147 | 108/143 |
+| Hard | 0.079 | 32/132 | 0.135 | 100/132 |
+| Extreme | 0.013 | 33/210 | 0.069 | 123/210 |
+

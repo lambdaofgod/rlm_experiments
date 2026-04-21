@@ -1,0 +1,540 @@
+#+title: Debugging
+
+
+* TODO Small models get stuck on example 71
+:PROPERTIES:
+:CREATED:  <2026-03-16 Mon> [18:26]
+:END:
+
+Average Metric: 71.00 / 71 (100.0%):   9%|████▋                                             | 71/750 [45:47:33<437:55:53, 2321.88s/it]
+
+Both raw and finetuned Qwen 3.5 4B gets stuck on this example and nothing happens.
+
+** TODO What is happening? Details
+:PROPERTIES:
+:CREATED:  <2026-03-16 Mon> [18:27]
+:END:
+
+*** Example 71 info
+
+- ID: =77784d72993a183b40785c111c3af5cc447638c44fe3b655e23a5ed615315eb6=
+- Token length: 64k
+- Difficulty: Moderate
+- Primary task: T1. Retrieval & Ranking
+- Secondary task: T1.1 Global Cohesive Retrieval
+- Context: 143,857 chars of JSON data (anime/drama episode ratings, appears to be One Piece)
+- Question: "Returns the names of all dramas with a rating >= 9.3, sorted by total votes high to low"
+- Expected answer: list of 5 episode names
+
+*** Findings from Phoenix traces
+
+The =dspy-sft-longbench-qwen4b= project has exactly 71 =CustomizableRLM.forward=
+root spans, matching the "71/750" progress bar. Example 71 never produced a trace --
+the process blocks before the RLM execution completes (or even starts tracing).
+
+The only traces containing this example's query text have =Predict.forward= as root
+(BootstrapFinetune fallback), not =CustomizableRLM.forward=. They are sub-millisecond
+cached responses, not real executions.
+
+3 of the 5 errored RLM spans across all examples are =litellm.Timeout: APITimeoutError=,
+but they took 434-449s to fire -- far exceeding the configured 60s timeout. The
+remaining 2 errors are =BrokenPipeError=. The slowest successful RLM span was 63s.
+
+*Root cause*: the llama.cpp server at =192.168.1.91:8080= hangs on certain
+large-context requests (this example is 64k tokens / 144k chars of JSON). The
+litellm timeout (configured at 60s) is not being enforced reliably -- it either
+fires at ~7 minutes or never fires at all, causing the process to block indefinitely.
+
+*** Reproduction
+
+#+begin_src shell
+uv run python collect_sft_data.py --config_path=debugging_config.yaml
+#+end_src
+
+Uses =problematic_examples.parquet= (single-row dataset containing only example 71).
+
+** TODO Debugging plan
+:PROPERTIES:
+:CREATED:  <2026-03-16 Mon> [18:27]
+:END:
+
+"Stuck" could mean several things. The debugging plan is to narrow down which one:
+
+*** TODO Step 1: Was example 71 ever reached? Triage the failure mode.
+
+#+BEGIN_SRC python :session debugging.org :exports both :async
+from tracing_backend import PhoenixBackend
+import json, pandas as pd
+
+backend = PhoenixBackend("http://localhost:6006/v1/traces")
+QUERY_NEEDLE = "dramas with a rating greater than or equal to 9.3"
+
+results = {}
+for project in ["dspy-sft-longbench-qwen4b", "dspy-sft-longbench-finetuned-qwen4b"]:
+    all_spans = backend.get_all_spans(project)
+    hits = all_spans[all_spans["input_value"].str.contains(QUERY_NEEDLE, na=False)]
+    if hits.empty:
+        results[project] = "NOT REACHED"
+        continue
+
+    # Get the trace for the first hit, summarize
+    trace_id = hits.iloc[0]["trace_id"]
+    trace = all_spans[all_spans["trace_id"] == trace_id]
+    root = trace[trace["parent_id"].isna()].iloc[0]
+    duration = root["end_time"] - root["start_time"] if pd.notna(root["end_time"]) else "STILL RUNNING"
+    n_iterations = trace["name"].str.contains("generate_action").sum()
+    n_lm_calls = trace["name"].str.contains("LM.__call__").sum()
+    error_spans = trace[trace["status_code"] == "ERROR"]
+
+    results[project] = {
+        "status": root["status_code"],
+        "duration": str(duration),
+        "iterations": n_iterations,
+        "lm_calls": n_lm_calls,
+        "errors": len(error_spans),
+        "error_msgs": error_spans["status_message"].dropna().unique().tolist()[:3],
+    }
+
+results
+#+END_SRC
+
+#+RESULTS:
+: /var/folders/t7/9zd9yqf17_zbfq2hwm8tv9ym0000gn/T/babel-vM62H3/python-v2pmMn
+
+Interpretation:
+- =NOT REACHED= -> the run got stuck *before* example 71 (unlikely given the progress bar)
+- =STILL RUNNING= with many iterations -> infinite loop / timeout
+- =ERROR= -> check error_msgs for the root cause
+- =OK= with huge duration -> single slow LLM call vs many fast ones tells us timeout vs loop
+
+*** TODO Step 2: Identify the bottleneck within the trace
+
+Only needed if Step 1 shows the example was reached. Look at per-iteration timing
+to find where time is spent -- one slow call vs many fast no-ops.
+
+#+BEGIN_SRC python :session debugging.org :exports both :async
+# Reuses all_spans, trace from step 1 -- pick whichever project had the trace
+action_spans = trace[trace["name"].str.contains("generate_action", na=False)].copy()
+action_spans["duration"] = action_spans["end_time"] - action_spans["start_time"]
+action_spans["has_code"] = action_spans["output_value"].apply(
+    lambda v: bool(json.loads(v).get("code", "").strip()) if pd.notna(v) else False
+)
+
+# Summary: how many iterations produced actual code vs empty?
+action_spans[["duration", "has_code"]].describe()
+#+END_SRC
+
+This answers: is it one call blocking forever, or 20 fast empty iterations?
+
+*** TODO Step 3: Reproduce with live tracing
+
+#+begin_src shell
+uv run python collect_sft_data.py --config_path=debugging_config.yaml
+#+end_src
+
+Watch live at http://localhost:6006 project =dspy-debug-example71=.
+
+*** Findings from debug_rlm.py (cached run)
+
+Running =debugging/debug_rlm.py= with cached LLM responses (all =generate_action=
+calls complete in 0.0s) reveals a second hang source:
+
+- Iterations 1-5 complete instantly (code interpreter runs fast)
+- *Iteration 6 hangs in =repl.execute()=*: the model generates a =while idx < len(context)=
+  loop doing character-by-character brace matching over 144k chars. The Pyodide/WASM
+  code interpreter cannot handle this at reasonable speed.
+
+The 4B model fails to parse the JSON in iterations 1-4 (the context is comma-separated
+JSON objects without a wrapping =[]= array, so =json.loads()= fails with "Extra data").
+By iteration 5-6, it resorts to manual character-by-character parsing, which is
+computationally infeasible in the sandboxed interpreter.
+
+*** Confirmed causes
+
+Two independent hang sources:
+
+1. *Code interpreter blocks on expensive loops* (confirmed): the model generates O(n)
+   character iteration code over 144k chars, which the WASM sandbox cannot execute
+   in reasonable time. This would happen even with a fast LLM.
+
+2. *LLM timeout not enforced* (from Phoenix traces): 3 errored spans show
+   =litellm.Timeout= firing at 434-449s instead of the configured 60s. For example 71,
+   the timeout may never fire at all. This is a separate issue from #1 but compounds it.
+
+** TODO Fix
+:PROPERTIES:
+:CREATED:  <2026-03-16 Mon> [18:27]
+:END:
+
+See tasks.org "Add hard timeouts to CustomizableRLM._execute_iteration".
+
+*** Verification: repl_timeout kills hung Deno process
+
+After implementing the fix, test with a 5s timeout on the debug config.
+This should fail fast on iteration 6 (the character-by-character JSON parser)
+instead of hanging.
+
+#+begin_src shell
+uv run python debugging/debug_rlm.py --repl_timeout=5
+#+end_src
+
+Or, modify =debugging_config.yaml= temporarily:
+
+#+begin_example
+module:
+  type: "CustomizableRLM"
+  signature: "context, query -> answer"
+  kwargs:
+    repl_timeout: 5
+#+end_example
+
+Expected behavior:
+- Iterations 1-5 complete instantly (cached, fast code)
+- Iteration 6 starts, the Deno process is killed after 5s
+- =REPLTimeoutError= raised, RLM call fails immediately
+- Total runtime: ~6s
+
+Confirmed working (2026-03-16):
+#+begin_example
+20:48:04 Failed after 6.2s: REPLTimeoutError: Code interpreter timed out after 5s
+#+end_example
+
+
+
+* TODO SUBMIT(answer) problem
+:PROPERTIES:
+:CREATED:  <2026-04-14 Tue> [21:19]
+:END:
+
+* TODO Root-ERROR trace survey in dspy-sft-longbench-qwen4b
+:PROPERTIES:
+:CREATED:  <2026-04-15 Wed>
+:END:
+
+Survey of ~CustomizableRLM.forward~ root spans with ~status_code == "ERROR"~
+in the ~dspy-sft-longbench-qwen4b~ Phoenix project.  These are failures
+where the RLM call itself raised -- distinct from the larger set of traces
+where the RLM returned a Prediction but a descendant span errored (see next
+section).
+
+Time window: 2026-03-12 17:37 UTC to 2026-03-17 12:26 UTC.
+
+** Buckets (45 root-ERROR traces total)
+
+| Count | Bucket                                    | Meaning                                             |
+|-------+-------------------------------------------+-----------------------------------------------------|
+|    31 | ~litellm.Timeout: APITimeoutError~        | Sub-LM (local Qwen4B at 192.168.1.91:8080) did not  |
+|       |                                           | respond within ~lm.timeout=60s~.                     |
+|    11 | ~OSError: [Errno 24] Too many open files~ | Host-level FD exhaustion. Same family as the        |
+|       |                                           | "Unhandled async error: PythonError" diagnosed in   |
+|       |                                           | the SUBMIT(answer) section above.                   |
+|     2 | ~BrokenPipeError: [Errno 32] Broken pipe~ | Deno subprocess stdin pipe closed during a write.   |
+|     1 | ~REPLTimeoutError~                        | Our own 300s ~repl_timeout~ firing on a runaway     |
+|       |                                           | interpreter -- working as intended.                 |
+
+** Observations
+
+- The 31 LM timeouts are *server-side*.  Our sandbox-crash fix does not
+  address them.  Mitigations: longer ~lm.timeout~, retry-on-timeout logic,
+  or a more stable inference server.
+- The 11 FD-exhaustion failures are consistent with the
+  ~llm_query_batched~-under-concurrency pattern: host-side sockets and Deno
+  subprocesses accumulate past the ~ulimit -n~ ceiling.  The
+  [[file:customizable_rlm.py][~customizable_rlm.py~]] crash-recovery fix
+  makes the *aftermath* cleaner (no phantom NameError/TypeError cascade in
+  the root-OK-descendants-ERROR traces) but does not prevent the initial
+  FD-exhaustion crash.  That needs either rlm-side tuning (smaller batch /
+  fewer ~ThreadPoolExecutor~ workers than the default 8) or host-side
+  ~ulimit~.
+- The 2 BrokenPipeError failures are the *other* shape of Deno death: the
+  upstream ~BrokenPipeError~ path in ~PythonInterpreter.execute~ already
+  resets the registration flags, so a single retry at the RLM level could
+  make these recoverable.  Today they surface as trace-level ERROR.
+- The 1 REPLTimeoutError is the ~repl_timeout=300s~ feature doing its job
+  on a runaway interpreter loop -- not a bug.
+
+* TODO Root-OK-descendants-ERROR trace survey in dspy-sft-longbench-qwen4b
+:PROPERTIES:
+:CREATED:  <2026-04-15 Wed>
+:END:
+
+Complement to the previous section.  These are traces where
+~CustomizableRLM.forward~ returned a Prediction (root ~status_code == "OK"~)
+but at least one descendant span errored.  Restricted to traces that
+actually have a ~CustomizableRLM.forward~ root -- orphan traces (pre-RLM
+~BootstrapFinetune~ fragments, adapter-only retries, etc.) are excluded.
+
+43 traces total.
+
+** Buckets
+
+| Count | Bucket                                                     | Span where it fires                                         |
+|-------+------------------------------------------------------------+-------------------------------------------------------------|
+|    40 | ~AdapterParseError~ -- ChatAdapter could not parse the LM  | Propagated up ~ChatAdapter.__call__~ ->                     |
+|       | response (missing ~[[ ## code ## ]]~ marker)               | ~Predict(StringSignature).forward~ -> ~Predict.forward~     |
+|       |                                                            | (3 ERROR spans per trace, 120 total)                         |
+|     2 | ~litellm.BadRequestError~: request ~106797 tokens exceeds  | ~LM.__call__~                                                |
+|       | sub-LM context window                                      |                                                             |
+|     1 | ~litellm.BadRequestError~: request ~106795 tokens exceeds  | ~LM.__call__~                                                |
+|       | sub-LM context window                                      |                                                             |
+
+** Takeaways
+
+- The 40 AdapterParseError traces are exactly the shape the "Catch
+  ~AdapterParseError~ instead of falling back to ~JSONAdapter~" task (now
+  DONE in tasks.org) was meant to eliminate.  Post-fix runs should not
+  produce these; the 40 traces here predate the fix being active in the
+  project.
+- The 3 BadRequestError traces are a distinct problem: the model's
+  generated ~llm_query~ prompt exceeded the sub-LM's context window.
+  Upstream of our sandbox fixes -- belongs in a separate bucket
+  (small-model-tips / context budget not respected).  Related to the
+  ~chars_for_sub_lm~ / capacity-patching work but not eliminated.
+
+** Practical target for the "dump failing examples" parquet
+
+Union of the 45 root-ERROR traces (previous section) and these 43
+root-OK-descendants-ERROR traces = *88 traces* with a real RLM call to
+associate back to a dataset row.
+
+* TODO Rerun results after sandbox-crash + prompt-construction + code-field fixes
+:PROPERTIES:
+:CREATED:  <2026-04-15 Wed>
+:END:
+
+Re-ran the deduplicated failing examples after applying:
+- "Fix cascading NameError/TypeError after Deno sandbox crashes mid-run"
+  (sandbox crash recovery: ~_force_registration_reset~ + crash-restart
+  observation in ~customizable_rlm.py~)
+- "Move RLM prompt construction into prompts.py" (action template now lives
+  locally; built in one ~.format()~ call via ~build_action_instructions~)
+- "Fix RLM code field description nudging small models to skip the
+  [[ ## code ## ]] marker" (the ~code~ ~OutputField~ description now
+  explicitly names the marker convention and demotes the markdown fence
+  to "optional and will be stripped")
+
+Each rerun lives in its own Phoenix project so the original
+~dspy-sft-longbench-qwen4b~ traces stay intact.
+
+** Group 1 rerun: ~dspy-debug-root-error-qwen4b-rerun~
+
+Source: ~debugging/failing_examples_root_error_qwen4b.parquet~ (12 unique
+examples, the dedup-by-latest-trace dump of the 13 non-timeout root-ERROR
+traces from the original survey above).
+
+*** Result
+
+| Metric                 | Before (original project) | After (rerun)            |
+|------------------------+---------------------------+--------------------------|
+| Root spans             | 12                        | 12                       |
+| Root status            | 12 ERROR                  | *12 OK*                  |
+| Failure shape          | OSError: Too many open    | (none at root level)     |
+|                        | files / BrokenPipeError / |                          |
+|                        | REPLTimeoutError          |                          |
+| Descendant ERROR spans | (varied)                  | 50 (one shape, see below)|
+
+The infra failures the original survey enumerated -- FD exhaustion,
+broken pipes, the dead-readline case that would have cascaded into the
+phantom ~NameError: llm_query~ + ~TypeError: SUBMIT() got an unexpected
+keyword argument 'answer'~ storm -- are gone.  The crash-recovery fix
+held: any sandbox death is now self-healed via the unconditional
+~_force_registration_reset~ before each ~repl.execute~, and the explicit
+crash-restart observation prevents the model from fighting the empty
+namespace.
+
+*** Remaining errors (50 spans, one shape, all sub-LM-side)
+
+| Count | Bucket                                                       | Layer       |
+|-------+--------------------------------------------------------------+-------------|
+|    50 | ~BadRequestError: OpenAIException - Expected 'content' to be | ~LM.__call__~ |
+|       | a string or an array~                                        |             |
+
+50 errors clustered in 41 traces (some examples retried the same broken
+~llm_query~ call up to 10x).  *Root cause is in the model's generated
+code, not in our infrastructure*: the model called
+~llm_query(some_dict)~ instead of ~llm_query(some_string)~.  The dict
+flowed unchallenged through the JSON-RPC tool bridge to the host-side
+~llm_query~ -> ~target_lm(prompt=some_dict)~ -> litellm packaged it as
+~messages=[{"role": "user", "content": <dict>}]~, and llama.cpp's
+OpenAI-compatible endpoint rejected it because ~content~ must be a
+string or a list of content parts.
+
+The ~llm_query~ Pyodide wrapper in ~dspy/primitives/runner.js~ is
+declared as ~def llm_query(prompt: str)~ but Python type hints don't
+enforce -- the dict slips through.  A one-line guard in
+~rlm._make_llm_tools.llm_query~ (raise ~TypeError~ on non-str input
+with a self-explanatory message) would surface the problem to the
+model immediately as a REPL observation, instead of bouncing through
+litellm and llama.cpp.  Filed-worthy follow-up; no task yet.
+
+** Group 2 rerun: ~dspy-debug-root-ok-descendants-error-qwen4b-rerun~
+
+Source: ~debugging/failing_examples_root_ok_descendants_error_qwen4b.parquet~
+(13 unique examples, the dedup-by-latest-trace dump of the 43
+root-OK-descendants-ERROR traces).
+
+*** Result
+
+| Metric                 | Before                   | After                |
+|------------------------+--------------------------+----------------------|
+| Root spans             | 13                       | 13                   |
+| Root status            | 13 OK                    | *12 OK / 1 ERROR*    |
+| AdapterParseError span | 40 (one trace per example) | *3* (one trace)     |
+| AdapterParseError      | 40 of 13 examples        | *1* of 13 examples   |
+| traces                 |                          |                      |
+
+The fence/marker fix (the ~code~ ~OutputField~ now reads "Output it
+directly after the [[ ## code ## ]] marker; markdown code fences
+... are optional and will be stripped" instead of "Use markdown code
+block format: ```python\n<code>\n```") roughly *13x reduction* in
+the AdapterParseError pattern -- 40 affected examples down to 1.  Not
+zero: small Qwen4B occasionally still substitutes ~Code:~ + ```python
+in place of the marker rather than wrapping in addition to it.
+
+The 1 ERROR root in the rerun is the context-window overflow described
+below, not a parse failure.
+
+*** Remaining errors (18 spans, three shapes, three traces)
+
+| Count | Bucket                                                          | Layer         |
+|-------+-----------------------------------------------------------------+---------------|
+|     8 | ~InternalServerError: OpenAIException - 'str' object has no     | ~LM.__call__~  |
+|       | attribute 'get'~                                                |               |
+|     5 | ~BadRequestError: request (40984 tokens) exceeds the available  | ~LM.__call__~  |
+|       | context size (40960 tokens), try increasing it~ (1 of these     | (4) + 1 root  |
+|       | propagates to the root span)                                    |               |
+|     3 | ~AdapterParseError~ (cascaded ~ChatAdapter.__call__~ ->         | adapter chain |
+|       | ~Predict(StringSignature).forward~ -> ~Predict.forward~)        |               |
+|     2 | ~litellm.Timeout~ (server-side hang past ~lm.timeout=60s~)      | ~LM.__call__~  |
+
+- *InternalServerError 'str' object has no attribute 'get'*: llama.cpp's
+  OpenAI shim choking on something in the request payload it expected to
+  be a dict.  Same trace, repeated 8x.  Upstream llama.cpp issue,
+  unrelated to our fixes.
+- *Context-window overflow*: the model packed ~40984 tokens into a single
+  ~llm_query~ call, 24 tokens past the sub-LM's 40960-token window.  The
+  small-model-tips text already nudges the model to batch, but the
+  threshold check is loose -- this is the same family as the 3 BadRequest
+  cases in the original survey.  Worth tightening the
+  ~chars_for_sub_lm~ / ~build_action_instructions~ guidance, or
+  validating prompt size at the ~llm_query~ tool level.
+- *AdapterParseError*: 1 trace, 3 propagated spans.  The residual fence
+  substitution case noted above.
+- *Timeout*: server-side, unrelated to our work.
+
+** Cross-summary
+
+| Pattern                   | Before fixes  | After fixes  | Fix that helped                                  |
+|---------------------------+---------------+--------------+--------------------------------------------------|
+| Sandbox infra failures    | 13 examples   | 0 examples   | "Fix cascading NameError/TypeError after Deno    |
+|                           |               |              | sandbox crashes mid-run"                         |
+| AdapterParseError cascade | 40 traces /   | 1 trace /    | "Fix RLM code field description nudging small    |
+|                           | 13 examples   | 1 example    | models to skip the [[ ## code ## ]] marker"      |
+| Sub-LM context overflow   | 3 traces      | 1 example    | (no fix yet -- same root cause as before)        |
+| LM timeouts               | server-side   | server-side  | (no fix -- needs server tuning or retry policy)  |
+| ~llm_query(dict)~ misuse  | (not isolated | 41 traces /  | (no fix yet -- new follow-up: type-guard on the  |
+|                           | in original   | 12 examples  | host-side ~llm_query~ tool)                       |
+|                           | survey)       |              |                                                  |
+
+* TODO Non-FD trace survey in v1-dspy-longbench-qwen4b-baseline
+:PROPERTIES:
+:CREATED:  <2026-04-18 Sat>
+:END:
+
+Survey of ~CustomizableRLM.forward~ trace failures in the
+~v1-dspy-longbench-qwen4b-baseline~ Phoenix project, excluding the 442
+FD-exhaustion roots that dominate the project (those belong to the
+separate fd-leak investigation under ~debugging/fd_leak/~).  Split into
+the usual two shapes: root-ERROR and root-OK-descendants-ERROR.
+
+Time window: 2026-04-17 11:36 UTC to 2026-04-18 08:52 UTC.
+
+Totals: 985 traces, 984 root spans (512 OK / 472 ERROR), 567 ERROR
+spans across the project.
+
+*Important context*: this run did *not* have ~fence_tolerant_adapter:
+true~ configured, so the adapter spans are ~ChatAdapter.__call__~
+(1537 spans) rather than ~FenceTolerantChatAdapter.__call__~
+(only 39 spans from some other path).  The ~AdapterParseError~
+bucket below therefore reflects stock-adapter behaviour, not the
+fence-tolerant recovery path.
+
+** Root-ERROR buckets, excluding FD exhaustion (31 traces)
+
+Of the 472 ERROR roots, 442 are ~OSError: Too many open files~
+(covered by the fd-leak investigation) and 31 are everything else:
+13 ~CustomizableRLM.forward~ + 18 orphan ~LM.__call__~.
+
+| Count | Bucket                                                      | Meaning                                                             |
+|-------+-------------------------------------------------------------+---------------------------------------------------------------------|
+|    16 | ~OperationalError: unable to open database file~            | Orphan ~LM.__call__~ roots -- DSPy's ~~/.dspy_cache~ SQLite failed  |
+|       |                                                             | to open.  Downstream effect of the FD cliff (no free fd for a new   |
+|       |                                                             | db handle), distinct shape from ~Errno 24~ but same root cause.     |
+|     5 | ~BrokenPipeError: [Errno 32] Broken pipe~                   | Deno subprocess stdin pipe closed mid-write -- the "other shape of  |
+|       |                                                             | Deno death" flagged in the 2026-04-15 survey.                        |
+|     3 | ~REPLTimeoutError: Code interpreter timed out after 300s~   | Our own ~repl_timeout=300s~ firing on runaway interpreter loops --  |
+|       |                                                             | working as intended.                                                |
+|     2 | ~BadRequestError~: request ~41308 tokens~ exceeds 40960     | Sub-LM context cap; same shape as the root-OK section below, just   |
+|       |                                                             | this one propagated to the root.                                    |
+|     2 | ~litellm.Timeout: APITimeoutError~                          | Sub-LM did not respond within ~lm.timeout=60s~.                     |
+|     2 | ~InternalServerError: Connection error~                     | Orphan ~LM.__call__~ roots -- network/server hiccup talking to the  |
+|       |                                                             | llama.cpp OpenAI shim.                                              |
+|     1 | ~AdapterParseError~                                         | Stock-adapter parse failure that propagated all the way to the root |
+|       |                                                             | (no JSONAdapter fallback, per ~use_json_adapter_fallback=False~).   |
+
+** Root-OK-descendants-ERROR buckets (16 of 174 OK-root traces, 9.2%)
+
+Of the 174 OK ~CustomizableRLM.forward~ roots, 16 contain at least one
+descendant ERROR.  21 distinct ERROR traces, 59 ERROR spans (AdapterParseError
+triples via the adapter chain, so counts inflate).
+
+| Count (traces / spans) | Bucket                                        | Span where it fires                                                |
+|------------------------+-----------------------------------------------+--------------------------------------------------------------------|
+|           11 / 20      | ~BadRequestError~: context overflow (up to   | ~LM.__call__~ -- sub-LM side; the model's ~llm_query~ prompt blew  |
+|                        | ~144066~ tokens vs 40960)                     | past the 40960-token window.                                       |
+|            7 / 33      | ~AdapterParseError~                           | ~ChatAdapter.__call__~ -> ~Predict(StringSignature).forward~ ->    |
+|                        |                                               | ~Predict.forward~ (3x propagation per occurrence).                 |
+|            3 /  6      | ~litellm.Timeout~                             | ~LM.__call__~ + ~ChatAdapter.__call__~.                            |
+
+** Observations
+
+- *Context overflow dominates the remaining failure set.*  11 of the 16
+  affected OK-root traces are the model packing the full 143k-char
+  ~context~ into a single ~llm_query~ call instead of batching.  Token
+  counts observed: 41308, 70362, 144058, 144066.  The
+  ~build_action_instructions~ capacity nudge is under-enforced here --
+  same family as the 3 cases in the 2026-04-15 survey.  A host-side
+  size check in ~_make_llm_tools.llm_query~ that raises before hitting
+  litellm would surface this as a REPL observation instead of a trace
+  error.  Follow-up material, no task yet.
+- *~AdapterParseError~ (7 traces / 33 spans) is not yet fixed in this
+  run.*  This is exactly the fence-in-body shape the
+  ~FenceTolerantChatAdapter~ targets -- but that adapter wasn't
+  configured for the traces in this project (1537
+  ~ChatAdapter.__call__~ spans vs only 39
+  ~FenceTolerantChatAdapter.__call__~).  A rerun of the 7 affected
+  examples with ~fence_tolerant_adapter: true~ in the collection
+  config is the validation step.  Until that rerun happens, this
+  bucket can't be used to judge whether the adapter solves anything.
+- *16 orphan ~LM.__call__~ / ~OperationalError~ roots are FD-adjacent.*
+  These are BootstrapFinetune-style fragments where the SQLite open in
+  the DSPy disk cache couldn't get a file descriptor.  Shape distinct
+  from the 442 direct ~Errno 24~s but same root cause (host-level FD
+  exhaustion mid-run).  The fd-leak investigation covers both.
+- *~litellm.Timeout~, ~BrokenPipeError~, ~REPLTimeoutError~ are all
+  already catalogued as known shapes* in the 2026-04-15 surveys above
+  -- no new diagnosis.
+
+** New findings vs the 2026-04-15 survey
+
+- *New shape*: ~OperationalError: unable to open database file~ as a
+  distinct manifestation of FD exhaustion propagating through the DSPy
+  disk cache.  Not present as a named bucket before; 16 orphan roots
+  here.
+- *Not observed here*: ~llm_query(dict)~ misuse
+  (~BadRequestError: Expected 'content' to be a string~) and
+  ~InternalServerError: 'str' object has no attribute 'get'~.  Both
+  appeared in the 2026-04-15 rerun.  Absence may be sampling noise or
+  may indicate the host-side ~llm_query~ type-guard task landed between
+  runs (worth checking ~git log~ before relying on it).
+
