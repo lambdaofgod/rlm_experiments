@@ -767,7 +767,7 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
           references from ~question_nonthinking~ to ~question_thinking~
     - [X] Regenerate the parquet:
           ~uv run python data_utils.py longbench_pro~
-    - [ ] :REQUIRES_VALIDATION: User spot-checks 3-5 rows in the new
+    - [X] :REQUIRES_VALIDATION: User spot-checks 3-5 rows in the new
           ~longbench_pro_en.parquet~ to confirm the transformed
           ~question_thinking~ reads naturally (raw text intact, bridge
           appended cleanly)
@@ -1260,6 +1260,162 @@ comparison.
           ~v1.1-dspy-longbench-qwen4b-baseline~ project first; verify
           annotations render in the Phoenix UI and re-runs overwrite
           (same ~annotation_name~ + ~span_id~) rather than append
+
+** TODO Report score-distribution stats alongside means
+   :PROPERTIES:
+   :CREATED: <2026-04-21>
+   :END:
+
+   Current per-task tables show mean and count (~Score~, ~n~), which
+   hides distribution shape.  A task with mean 0.800 and n=10 could
+   be 8 perfect + 2 zero OR 10 cases of ~0.8 partial credit; those
+   are very different model behaviors but indistinguishable in the
+   table.  Two additions cover this:
+
+   1. Counts of score-exactly-0 and score-exactly-1
+      (~n_zero_score~, ~n_perfect_score~) per-task and in Overall --
+      "how many examples did the model nail" is the single most
+      interesting number for RLM debugging.  (Landed.)
+   2. Score histograms with 0.1-width buckets in the per-metric and
+      Overall sections.  Histograms live only where the per-task
+      detail is too thin to be useful -- grouping by metric smooths
+      out per-task noise, and Overall gives the shape of the whole
+      run at a glance.  Per-task / per-length / per-difficulty
+      tables stay as-is (per-task already has the 0/1 counts; length
+      and difficulty are cross-cut rollups where a histogram adds
+      little).
+
+   Applies to ~evaluate.py~ (per-task table + Overall line for
+   counts; per-metric histograms + Overall histogram for the
+   distribution view).  ~compare_evals.py~ gets the per-task
+   count columns only -- histograms deferred; the compare output
+   is already dense.
+
+*** Approach
+
+    1. Extend ~GroupStats~ in ~config_model.py~ with ~n_zero_score: int~
+       and ~n_perfect_score: int~.  Keep ~avg~ and ~n~ as-is so existing
+       JSON consumers don't break; old JSON files missing the new
+       fields get ~0~ defaults.  (Landed.)
+    2. Update ~_aggregate~ in ~evaluate.py~ to count
+       ~sum(1 for s in scores if s == 0.0)~ and
+       ~sum(1 for s in scores if s == 1.0)~ per bucket.  (Landed.)
+    3. Update the per-task table in ~_print_summary~ to add two
+       columns.  Leave per-metric / per-length / per-difficulty
+       tables unchanged.  (Landed.)
+    4. Update the Overall line to append the two counts:
+       ~0.190 (n=533, skipped=44, n_zero_score=284, n_perfect_score=87)~.
+       (Landed.)
+    5. Update the per-task head-to-head table in
+       ~compare_evals.py~ to add ~n_zero_score~ / ~n_perfect_score~ columns
+       per model side (computed from the shared-subset scores, not
+       the full set, since head-to-head is on shared).  (Landed.)
+    6. Add a ~_score_histogram(scores, bucket_size=0.1)~ pure helper
+       in ~evaluate.py~.  Returns a list of
+       ~round(1 / bucket_size)~ bucket counts.  Boundaries are
+       half-open ~[k*bucket_size, (k+1)*bucket_size)~ except the
+       last bucket, which is closed so ~score == 1.0~ falls into it.
+       Default ~0.1~ gives the 10-bucket layout documented below;
+       tuning is a keyword-arg change at the caller, no CLI flag yet.
+    7. Add a ~_print_histogram(title, scores, bucket_size=0.1)~
+       helper that emits a plain-text histogram inside an org
+       ~#+begin_example~ block (plain text avoids org-mode table
+       line wrapping and keeps the bars aligned).  Passes
+       ~bucket_size~ through to ~_score_histogram~.  Label precision
+       derives from ~bucket_size~ -- ~max(1, -floor(log10(bucket_size)))~
+       decimal places -- so ~0.1~ renders as ~"0.0 - 0.1"~,
+       ~0.05~ as ~"0.00 - 0.05"~, ~0.25~ as ~"0.00 - 0.25"~.  Format
+       below assumes the ~0.1~ default.
+    8. Under ~** Per-metric scores~, after the existing summary
+       table, emit one ~*** <metric> histogram (n=...)~ sub-section
+       per metric with its histogram block.  Metrics ordered the
+       same as the summary table (alphabetical).
+    9. Under ~** Overall~, after the summary line, emit an ~Overall
+       histogram~ subsection using the same helper.
+   10. Histograms are print-only; do NOT add per-bucket counts to
+       ~GroupStats~ or the JSON schema.  Keep them as a
+       recomputed-at-print-time artifact to avoid bloating the
+       serialized report.
+
+*** Histogram format
+
+    Fixed-width layout so the right-side ~[pct% (n)]~ annotation
+    lines up across rows.  Bar area is 40 chars wide (scales to
+    100%, so each ~#~ = 2.5%); bar is left-aligned and padded with
+    spaces to fill the area; two spaces of gap; then the right-side
+    annotation ~[%3d%% (%d)]~ -- 3-digit zero-padded-by-space percent
+    so ~0~, ~10~, and ~100~ all end at the same column before ~%~.
+
+    Layout per line:
+    ~"%.1f - %.1f %-40s  [%3d%% (%d)]"~
+
+    Where the first ~%-40s~ holds the bar (e.g. ~"####"~) padded on
+    the right to 40 chars.  Worked example:
+
+    #+BEGIN_EXAMPLE
+    *** accuracy histogram (n=95)
+    #+begin_example
+    0.0 - 0.1 ################################          [ 80% (76)]
+    0.1 - 0.2                                           [  0% (0)]
+    0.2 - 0.3 #                                         [  3% (3)]
+    0.3 - 0.4                                           [  0% (0)]
+    0.4 - 0.5                                           [  0% (0)]
+    0.5 - 0.6 ##                                        [  5% (5)]
+    0.6 - 0.7                                           [  0% (0)]
+    0.7 - 0.8                                           [  0% (0)]
+    0.8 - 0.9                                           [  0% (0)]
+    0.9 - 1.0 ####                                      [ 12% (11)]
+    #+end_example
+    #+END_EXAMPLE
+
+    Empty buckets print as blank bar + ~[  0% (0)]~ so all 10 rows
+    are visible and the user can see "this bucket is empty, not
+    missing".
+
+*** Subtasks
+
+    - [X] Add ~n_zero_score: int = 0~ and ~n_perfect_score: int = 0~ fields to
+          ~GroupStats~ in ~config_model.py~
+    - [X] Extend ~_aggregate~ in ~evaluate.py~ to populate the two
+          counts for every ~GroupStats~ it builds (per_task,
+          per_metric, per_length, per_difficulty, overall)
+    - [X] Update the ~Per-task scores~ table header and row format
+          in ~_print_summary~ to include ~n_zero_score~ and ~n_perfect_score~
+          columns
+    - [X] Update the ~Overall~ line format in ~_print_summary~ to
+          append ~n_zero_score=...~ and ~n_perfect_score=...~
+    - [X] Update the ~Per-task breakdown~ table in
+          ~compare_evals.py~ (~_print_head_to_head~) to add
+          ~n_zero_score~ / ~n_perfect_score~ columns for each model, computed
+          from the shared-subset scores
+    - [X] Spot-check: rerun ~evaluate.py local_phoenix_config.yaml~
+          and ~compare_evals.py~ on the existing eval JSONs; confirm
+          counts sum to ~n~ only when everyone is exactly 0 or 1 and
+          are plausible vs the means
+    - [X] Add ~_score_histogram(scores, bucket_size=0.1)~ pure
+          helper in ~evaluate.py~ -- returns
+          ~round(1 / bucket_size)~ bucket counts, last bucket
+          inclusive of 1.0
+    - [X] Add ~_print_histogram(title, scores, bucket_size=0.1)~
+          helper that emits the plain-text fixed-width format inside
+          an ~#+begin_example~ block; all bucket rows printed; label
+          precision scales with ~bucket_size~
+    - [X] Wire per-metric histograms into ~_print_summary~ -- one
+          ~*** <metric> histogram~ subsection per metric, emitted
+          after the existing ~Per-metric scores~ table, same metric
+          ordering
+    - [X] Wire the Overall histogram into ~_print_summary~ --
+          emitted after the Overall summary line, titled ~Overall
+          histogram (n=...)~
+    - [X] Spot-check: re-run the same inline aggregation from the
+          last spot-check and verify that for ~evals_local_v11~ the
+          histogram bucket counts sum to the metric/overall ~n~, the
+          ~[0.0-0.1)~ and ~[0.9-1.0]~ buckets roughly track
+          ~n_zero_score~ and ~n_perfect_score~, and the right-side
+          ~[pct% (n)]~ brackets line up in the same column
+    - [ ] Refresh ~evals/eval_results.org~ by re-running the two
+          evaluate blocks and the comparison block so the file's
+          ~#+RESULTS:~ sections show the new columns and histograms
 
 * RLM error handling
 

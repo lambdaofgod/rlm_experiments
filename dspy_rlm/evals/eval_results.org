@@ -323,3 +323,189 @@ Average on shared: evals_qwen397b=0.385, evals_local_v11=0.254
 | Hard       |              0.079 | 32/132                |               0.135 | 100/132                |
 | Extreme    |              0.013 | 33/210                |               0.069 | 123/210                |
 
+
+* v1.2
+:PROPERTIES:
+:CREATED:  <2026-04-22 Wed> [11:43]
+:END:
+
+This version had a significant change - prompting fix which removed previous mangling
+Right now prompts went back to containing examples - boosts performance because the examples give important formatting information.
+
+** v1.2-dspy-sft-train-data-longbench-qwen397b
+:PROPERTIES:
+:CREATED:  <2026-04-22 Wed> [11:45]
+:END:
+
+#+BEGIN_SRC bash :results output raw
+cd ..; uv run python evaluate.py config_qwen397b.yaml -o evals/evals_qwen397b_v12.json
+#+END_SRC
+
+#+RESULTS:
+Fetching root spans from 'v1.2-dspy-sft-train-data-longbench-qwen397b' (limit=10000)...
+  fetched 651 spans in 4.7s
+Fetched 651 root spans, 250 CustomizableRLM.forward, 241 OK, 9 errors
+Matched 241 unique predictions
+Matched 241/750 examples
+
+** Trace errors (9)
+
+| count | message |
+|-------+---------|
+| 7 | BrokenPipeError: [Errno 32] Broken pipe |
+| 1 | REPLTimeoutError: Code interpreter timed out after 300s |
+| 1 | AttributeError: 'NoneType' object has no attribute 'strip' |
+
+** Per-task scores
+
+| Task | Metric | Score | n | n_zero_score | n_perfect_score |
+|------+--------+-------+---+--------------+-----------------|
+| T1.1 | ndcg | 0.588 | 9 | 2 | 2 |
+| T1.2 | ndcg | 0.930 | 9 | 0 | 6 |
+| T10.1 | sub_em | 0.667 | 9 | 3 | 6 |
+| T10.2 | sub_em | 0.200 | 10 | 8 | 2 |
+| T11.1 | accuracy | 0.300 | 10 | 7 | 3 |
+| T11.2 | accuracy | 0.500 | 10 | 5 | 5 |
+| T2.1 | pairwise_accuracy | 0.887 | 10 | 0 | 3 |
+| T2.2 | pairwise_accuracy | 0.528 | 10 | 3 | 0 |
+| T3.1 | accuracy | 0.500 | 10 | 5 | 5 |
+| T3.2 | accuracy | 0.500 | 10 | 5 | 5 |
+| T5.1 | f1_score | 0.677 | 10 | 3 | 5 |
+| T5.2 | f1_score | 0.850 | 10 | 0 | 6 |
+| T6.1 | sub_em | 0.480 | 10 | 1 | 2 |
+| T6.2 | f1_score | 0.577 | 10 | 1 | 2 |
+| T6.3 | pairwise_accuracy | 0.923 | 10 | 0 | 8 |
+| T7.1 | f1_score | 0.747 | 9 | 1 | 4 |
+| T7.2 | f1_score | 0.482 | 10 | 3 | 4 |
+| T7.3 | f1_score | 0.320 | 6 | 2 | 0 |
+| T8.1 | sub_em | 0.800 | 10 | 2 | 8 |
+| T8.2 | sub_em | 0.700 | 10 | 3 | 7 |
+| T8.3 | sub_em | 1.000 | 10 | 0 | 10 |
+| T9.1 | f1_score | 0.836 | 10 | 1 | 7 |
+| T9.2 | f1_score | 0.744 | 9 | 1 | 5 |
+
+** Per-metric scores
+
+| Metric | Score | n |
+|--------+-------+---|
+| accuracy | 0.450 | 40 |
+| f1_score | 0.670 | 74 |
+| ndcg | 0.759 | 18 |
+| pairwise_accuracy | 0.779 | 30 |
+| sub_em | 0.641 | 59 |
+
+*** accuracy histogram (n=40)
+
+#+begin_example
+0.0 - 0.1 ######################                    [ 55% (22)]
+0.1 - 0.2                                           [  0% (0)]
+0.2 - 0.3                                           [  0% (0)]
+0.3 - 0.4                                           [  0% (0)]
+0.4 - 0.5                                           [  0% (0)]
+0.5 - 0.6                                           [  0% (0)]
+0.6 - 0.7                                           [  0% (0)]
+0.7 - 0.8                                           [  0% (0)]
+0.8 - 0.9                                           [  0% (0)]
+0.9 - 1.0 ##################                        [ 45% (18)]
+#+end_example
+
+*** f1_score histogram (n=74)
+
+#+begin_example
+0.0 - 0.1 ######                                    [ 16% (12)]
+0.1 - 0.2                                           [  1% (1)]
+0.2 - 0.3 ##                                        [  4% (3)]
+0.3 - 0.4 ###                                       [  7% (5)]
+0.4 - 0.5 #                                         [  3% (2)]
+0.5 - 0.6 ##                                        [  4% (3)]
+0.6 - 0.7 ####                                      [  9% (7)]
+0.7 - 0.8                                           [  0% (0)]
+0.8 - 0.9 ###                                       [  8% (6)]
+0.9 - 1.0 ###################                       [ 47% (35)]
+#+end_example
+
+*** ndcg histogram (n=18)
+
+#+begin_example
+0.0 - 0.1 ####                                      [ 11% (2)]
+0.1 - 0.2                                           [  0% (0)]
+0.2 - 0.3                                           [  0% (0)]
+0.3 - 0.4 ##                                        [  6% (1)]
+0.4 - 0.5                                           [  0% (0)]
+0.5 - 0.6 ####                                      [ 11% (2)]
+0.6 - 0.7 ##                                        [  6% (1)]
+0.7 - 0.8 ##                                        [  6% (1)]
+0.8 - 0.9 ##                                        [  6% (1)]
+0.9 - 1.0 ######################                    [ 56% (10)]
+#+end_example
+
+*** pairwise_accuracy histogram (n=30)
+
+#+begin_example
+0.0 - 0.1 ####                                      [ 10% (3)]
+0.1 - 0.2                                           [  0% (0)]
+0.2 - 0.3                                           [  0% (0)]
+0.3 - 0.4 #                                         [  3% (1)]
+0.4 - 0.5                                           [  0% (0)]
+0.5 - 0.6 #                                         [  3% (1)]
+0.6 - 0.7 ####                                      [ 10% (3)]
+0.7 - 0.8 ###                                       [  7% (2)]
+0.8 - 0.9 ####                                      [ 10% (3)]
+0.9 - 1.0 #######################                   [ 57% (17)]
+#+end_example
+
+*** sub_em histogram (n=59)
+
+#+begin_example
+0.0 - 0.1 ############                              [ 29% (17)]
+0.1 - 0.2                                           [  0% (0)]
+0.2 - 0.3 ##                                        [  5% (3)]
+0.3 - 0.4                                           [  0% (0)]
+0.4 - 0.5                                           [  0% (0)]
+0.5 - 0.6 ###                                       [  7% (4)]
+0.6 - 0.7                                           [  0% (0)]
+0.7 - 0.8                                           [  0% (0)]
+0.8 - 0.9                                           [  0% (0)]
+0.9 - 1.0 ########################                  [ 59% (35)]
+#+end_example
+
+** Per-context-length scores
+
+| Length | Score | n |
+|--------+-------+---|
+| 8k | 0.682 | 109 |
+| 16k | 0.619 | 110 |
+| 32k | 0.000 | 1 |
+| 64k | 0.000 | 1 |
+
+** Per-difficulty scores
+
+| Difficulty | Score | n |
+|------------+-------+---|
+| Easy | 0.715 | 107 |
+| Moderate | 0.649 | 44 |
+| Hard | 0.684 | 35 |
+| Extreme | 0.382 | 35 |
+
+** Overall
+
+0.644 (n=221, skipped=20, n_zero_score=56, n_perfect_score=105)
+
+*** Overall histogram (n=221)
+
+#+begin_example
+0.0 - 0.1 ##########                                [ 25% (56)]
+0.1 - 0.2                                           [  0% (1)]
+0.2 - 0.3 #                                         [  3% (6)]
+0.3 - 0.4 #                                         [  3% (7)]
+0.4 - 0.5                                           [  1% (2)]
+0.5 - 0.6 ##                                        [  5% (10)]
+0.6 - 0.7 ##                                        [  5% (11)]
+0.7 - 0.8                                           [  1% (3)]
+0.8 - 0.9 ##                                        [  5% (10)]
+0.9 - 1.0 #####################                     [ 52% (115)]
+#+end_example
+
+Metrics written to evals/evals_qwen397b_v12.json
+Logging 221 annotations to Phoenix ('v1.2-dspy-sft-train-data-longbench-qwen397b')...
+  logged in 0.2s

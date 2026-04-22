@@ -112,16 +112,20 @@ def _print_head_to_head(df, labels):
 
         print(f"*** Per-task breakdown: {la} vs {lb}")
         print()
-        print(f"| Task | {la} | n_{la} | {lb} | n_{lb} | delta |")
-        print("|------+------+--------+------+--------+-------|")
+        print(f"| Task | {la} | n_{la} | zero_{la} | perfect_{la} | {lb} | n_{lb} | zero_{lb} | perfect_{lb} | delta |")
+        print("|------+------+--------+-----------+--------------+------+--------+-----------+--------------+-------|")
         for task in sorted(task_stats.keys(), key=lambda t: (int(t[1:].split(".")[0]), int(t.split(".")[1]))):
             sa = task_stats[task]["a"]
             sb = task_stats[task]["b"]
             avg_a = sum(sa) / len(sa)
             avg_b = sum(sb) / len(sb)
+            za = sum(1 for s in sa if s == 0.0)
+            pa = sum(1 for s in sa if s == 1.0)
+            zb = sum(1 for s in sb if s == 0.0)
+            pb = sum(1 for s in sb if s == 1.0)
             delta = avg_a - avg_b
             sign = "+" if delta >= 0 else ""
-            print(f"| {task} | {avg_a:.3f} | {len(sa)} | {avg_b:.3f} | {len(sb)} | {sign}{delta:.3f} |")
+            print(f"| {task} | {avg_a:.3f} | {len(sa)} | {za} | {pa} | {avg_b:.3f} | {len(sb)} | {zb} | {pb} | {sign}{delta:.3f} |")
         print()
 
 

@@ -398,7 +398,12 @@ def _aggregate(results, skipped):
             difficulty_scores[r.difficulty].append(r.score)
 
     def _gs(scores):
-        return GroupStats(avg=sum(scores) / len(scores) if scores else 0.0, n=len(scores))
+        return GroupStats(
+            avg=sum(scores) / len(scores) if scores else 0.0,
+            n=len(scores),
+            n_zero_score=sum(1 for s in scores if s == 0.0),
+            n_perfect_score=sum(1 for s in scores if s == 1.0),
+        )
 
     all_scores = [r.score for r in results]
     return EvalSummary(
@@ -443,6 +448,33 @@ def _print_error_summary(error_summary, show_errors):
         print()
 
 
+def _score_histogram(scores, bucket_size=0.1):
+    n_buckets = round(1 / bucket_size)
+    buckets = [0] * n_buckets
+    for s in scores:
+        idx = min(int(s / bucket_size), n_buckets - 1)
+        buckets[idx] += 1
+    return buckets
+
+
+def _print_histogram(title, scores, bucket_size=0.1):
+    buckets = _score_histogram(scores, bucket_size)
+    n = len(scores)
+    decimals = max(1, -math.floor(math.log10(bucket_size)))
+    label_fmt = f"%.{decimals}f - %.{decimals}f"
+    print(f"*** {title}")
+    print()
+    print("#+begin_example")
+    for i, count in enumerate(buckets):
+        lo = i * bucket_size
+        hi = (i + 1) * bucket_size
+        pct = int(round(100 * count / n)) if n else 0
+        bar = "#" * int(round(pct * 0.4))
+        print(f"{label_fmt % (lo, hi)} {bar:<40}  [{pct:3d}% ({count})]")
+    print("#+end_example")
+    print()
+
+
 def _print_summary(summary, results, show_errors, error_summary=None):
     """Print evaluation summary to stdout as org-mode."""
     _print_error_summary(error_summary, show_errors)
@@ -462,11 +494,11 @@ def _print_summary(summary, results, show_errors, error_summary=None):
 
     print("** Per-task scores")
     print()
-    print("| Task | Metric | Score | n |")
-    print("|------+--------+-------+---|")
+    print("| Task | Metric | Score | n | n_zero_score | n_perfect_score |")
+    print("|------+--------+-------+---+--------------+-----------------|")
     for code, stats in summary.per_task.items():
         metric_name = get_metric(code).__name__
-        print(f"| {code} | {metric_name} | {stats.avg:.3f} | {stats.n} |")
+        print(f"| {code} | {metric_name} | {stats.avg:.3f} | {stats.n} | {stats.n_zero_score} | {stats.n_perfect_score} |")
     print()
 
     print("** Per-metric scores")
@@ -476,6 +508,13 @@ def _print_summary(summary, results, show_errors, error_summary=None):
     for name, stats in summary.per_metric.items():
         print(f"| {name} | {stats.avg:.3f} | {stats.n} |")
     print()
+
+    metric_scores = defaultdict(list)
+    for r in results:
+        metric_scores[r.metric].append(r.score)
+    for name in summary.per_metric.keys():
+        scores = metric_scores[name]
+        _print_histogram(f"{name} histogram (n={len(scores)})", scores)
 
     if summary.per_length:
         print("** Per-context-length scores")
@@ -502,10 +541,13 @@ def _print_summary(summary, results, show_errors, error_summary=None):
     print("** Overall")
     print()
     if summary.overall.n:
-        print(f"{summary.overall.avg:.3f} (n={summary.overall.n}, skipped={summary.skipped})")
+        o = summary.overall
+        print(f"{o.avg:.3f} (n={o.n}, skipped={summary.skipped}, n_zero_score={o.n_zero_score}, n_perfect_score={o.n_perfect_score})")
+        print()
+        _print_histogram(f"Overall histogram (n={o.n})", [r.score for r in results])
     else:
         print(f"No scores computed (skipped={summary.skipped})")
-    print()
+        print()
 
 
 def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None, error_summary=None):

@@ -69,6 +69,8 @@ class Config(BaseModel):
 class GroupStats(BaseModel):
     avg: float
     n: int
+    n_zero_score: int = 0
+    n_perfect_score: int = 0
 
 
 class ScoredExample(BaseModel):
