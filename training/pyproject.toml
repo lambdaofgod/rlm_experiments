@@ -16,8 +16,8 @@ dependencies = [
     "transformers==5.2.0",
     "triton>=3.3.0",
     "trl==0.22.2",
-    "unsloth-zoo[base]",
-    "unsloth[base]",
+    "unsloth-zoo[base]==2026.3.2",
+    "unsloth[base]==2026.3.4",
     "xformers==0.0.32.post2",
 ]
 

@@ -41,6 +41,7 @@ class SFTTrainingConfig(BaseModel):
     data_path: str
     output_dir: str
     trackio_project: str | None = None
+    gguf_quantizations: list[str] = []
     model: ModelConfig
     lora: LoraConfig
     training: TrainingConfig

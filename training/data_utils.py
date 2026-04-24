@@ -1,3 +1,4 @@
+import pandas as pd
 from datasets import Dataset, load_dataset
 from unsloth.chat_templates import standardize_data_formats
 
@@ -32,3 +33,9 @@ def format_for_sft(dataset: Dataset, tokenizer) -> Dataset:
 
     dataset = dataset.map(formatting_prompts_func, batched=True)
     return dataset
+
+
+def print_token_length_stats(dataset: Dataset, tokenizer) -> None:
+    tok = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+    lengths = [len(tok.encode(t)) for t in dataset["text"]]
+    print(pd.Series(lengths, name="token_length").describe())

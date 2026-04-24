@@ -14,7 +14,7 @@ services:
               count: all
               capabilities: [gpu]
     command: >
-      --hf-repo cameronbergh/rlm-qwen3-8b-v0.1-gguf
-      --hf-file rlm-qwen3-8b-v0.1-q8_0.gguf
-      -c 40960
-      --temp 0
+      --hf-repo ${HF_REPO:-unsloth/Qwen3.5-4B-GGUF}
+      --hf-file ${HF_FILE:-Qwen3.5-4B-Q8_0.gguf}
+      -c ${CONTEXT_SIZE:-40960}
+      --temp ${TEMPERATURE:-0}

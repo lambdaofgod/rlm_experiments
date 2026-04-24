@@ -14,7 +14,7 @@ from unsloth.chat_templates import get_chat_template, train_on_responses_only
 from trl import SFTTrainer, SFTConfig
 
 from config import SFTTrainingConfig
-from data_utils import load_jsonl_dataset, format_for_sft
+from data_utils import load_jsonl_dataset, format_for_sft, print_token_length_stats
 
 
 def main(config_path: str = "config.yaml"):
@@ -46,6 +46,7 @@ def main(config_path: str = "config.yaml"):
     # --- Load and format data ---
     dataset = load_jsonl_dataset(config.data_path)
     dataset = format_for_sft(dataset, tokenizer)
+    print_token_length_stats(dataset, tokenizer)
 
     # --- SFTTrainer (Q3nb cell-21) ---
     t = config.training
@@ -106,6 +107,15 @@ def main(config_path: str = "config.yaml"):
     model.save_pretrained(lora_dir)
     tokenizer.save_pretrained(lora_dir)
     print(f"LoRA adapters saved to {lora_dir}")
+
+    # --- GGUF export ---
+    for quant in config.gguf_quantizations:
+        gguf_dir = str(Path(config.output_dir) / f"gguf_{quant}")
+        try:
+            model.save_pretrained_gguf(gguf_dir, tokenizer, quantization_method=quant)
+            print(f"GGUF model saved to {gguf_dir} (quantization: {quant})")
+        except Exception as e:
+            print(f"GGUF export failed for quantization '{quant}': {e}")
 
 
 if __name__ == "__main__":

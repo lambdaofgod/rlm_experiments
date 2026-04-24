@@ -1,10 +1,12 @@
-data_path: sft_train_easy_medium_part.jsonl
-output_dir: outputs_qwen3_5
-trackio_project: qwen35partial
+data_path: qwen122_sft_traces.json
+output_dir: outputs_qwen3_5_4b
+trackio_project: qwen3_4_4b
+gguf_quantizations:
+  - q8_0
 
 model:
   name: unsloth/Qwen3.5-4B
-  max_seq_length: 32768
+  max_seq_length: 16384
   load_in_4bit: true
 
 lora:
@@ -15,7 +17,7 @@ lora:
 training:
   num_train_epochs: 1
   batch_size: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   learning_rate: 2e-4
   warmup_steps: 5
   weight_decay: 0.001
