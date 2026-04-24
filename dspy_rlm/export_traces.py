@@ -45,7 +45,7 @@ def _trace_to_training_examples(trace_spans):
         # Skip JSONAdapter retries
         parent_id = lm_span[PARENT_ID]
         parent_name = parent_names.get(parent_id, "")
-        if parent_name != "ChatAdapter.__call__":
+        if not parent_name.endswith("ChatAdapter.__call__"):
             continue
 
         input_data = json.loads(lm_span[INPUT_VALUE])
@@ -115,7 +115,7 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
 
     # Build dataset lookups
     dataset = pd.read_parquet(cfg.dataset.path)
-    question_to_row, transformed_to_row = build_question_lookup(dataset)
+    question_to_row = build_question_lookup(dataset)
 
     # Process each trace
     all_examples = []
@@ -127,7 +127,7 @@ def export_traces(config_path, output="traces.jsonl", metrics_file=None, min_sco
     for _, root_span in root_spans.iterrows():
         input_data = json.loads(root_span[INPUT_VALUE])
         query = input_data["input_args"]["query"]
-        matched_row = match_question_to_row(query, question_to_row, transformed_to_row)
+        matched_row = match_question_to_row(query, question_to_row)
         row_id = matched_row["id"] if matched_row is not None else None
 
         if row_id is None:

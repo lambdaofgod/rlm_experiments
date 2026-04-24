@@ -109,6 +109,7 @@ class EvalReport(BaseModel):
     summary: EvalSummary
     examples: list[ScoredExample]
     error_summary: Optional[ErrorSummary] = None
+    traces_project: Optional[str] = None
 
 
 def load_config(config_path: str) -> Config:

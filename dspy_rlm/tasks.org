@@ -765,6 +765,12 @@ Fixed by adding ~always_true~ metric option in ~collect_sft_data.py~.
     - [X] Simplify ~match_question_to_row~ to a one-line dict get
     - [X] Update ~evaluate.py~ / ~debug_rlm.py~ / ~debug_matching.py~
           references from ~question_nonthinking~ to ~question_thinking~
+    - [X] Update ~export_traces.py~ to the new single-dict
+          ~build_question_lookup~ / two-arg ~match_question_to_row~
+          signatures (missed in the earlier migration; current call
+          sites at ~export_traces.py:118~ and ~:130~ still expect the
+          old tuple return / three-arg match, which breaks
+          ~uv run python export_traces.py ...~)
     - [X] Regenerate the parquet:
           ~uv run python data_utils.py longbench_pro~
     - [X] :REQUIRES_VALIDATION: User spot-checks 3-5 rows in the new
@@ -1118,6 +1124,95 @@ comparison.
     - [X] Implement adjusted scoring (missing = 0)
     - [X] Print comparison summary table
     - [X] Test with ~easy_medium_metrics.json~ vs ~local_metrics.json~
+
+** TODO Export per-example head-to-head winners from ~compare_evals.py~
+   :PROPERTIES:
+   :CREATED: <2026-04-23>
+   :END:
+
+   Right now ~compare_evals.py~ prints aggregate head-to-head counts
+   (A wins / ties / B wins) plus per-task / per-dimension averages,
+   but there is no way to pull out *which specific examples* one
+   model beat another on.  When we see "qwen397b wins 18, haiku wins
+   7 on T5.1", we want to eyeball the 7 losses to decide whether
+   they are genuinely harder, tokenizer artifacts, or formatting
+   mismatches -- and the 18 wins to confirm the gap is real.
+
+   Add an opt-in export that, for every pair in the comparison,
+   writes the rows where the two models disagreed, tagged with which
+   side won.  Only shared (both-scored) rows are eligible; ties
+   skipped by default.
+
+*** Label = Phoenix/Arize project name
+
+    Current ~_model_label~ uses the metrics-JSON filename, which is
+    arbitrary and local.  Switching to the project name makes labels
+    stable and meaningful across machines.  ~EvalReport~ does not
+    currently carry the project name, so this task depends on:
+
+    - Adding ~traces_project: Optional[str]~ to ~EvalReport~ in
+      ~config_model.py~
+    - Populating it in ~evaluate.py~ from ~cfg.traces_project~ at
+      report-write time
+    - ~_model_label~ reads ~report.traces_project~ and falls back to
+      the filename stem if the field is missing (for old JSONs)
+
+*** Output shape
+
+    JSONL, one record per disagreeing row, nested by label.  ~id~ is
+    the LongBench-Pro dataset row hash (not human-readable on its
+    own), so we also carry the raw ~question~ column from the
+    dataset parquet -- that is what makes the record self-describing
+    when eyeballing wins/losses.  We skip ~question_thinking~ since
+    it carries the RLM bridge boilerplate.
+
+    #+BEGIN_EXAMPLE
+    {"id": "21bc25c2f4deeef9",
+     "question": "Given the following ...",
+     "task": "T5.1",
+     "token_length": "16k",
+     "difficulty": "Moderate",
+     "winner": "v1.2-dspy-longbench-qwen397b",
+     "gold_answer": ["..."],
+     "v1.2-dspy-longbench-qwen397b": {
+        "metric": "exact_match",
+        "score": 1.0,
+        "pred": ["..."]
+     },
+     "v1.1-dspy-longbench-haiku": {
+        "metric": "exact_match",
+        "score": 0.0,
+        "pred": ["..."]
+     }}
+    #+END_EXAMPLE
+
+    File naming: ~<dir>/h2h_<la>_vs_<lb>.jsonl~.  Project names can
+    contain characters awkward on disk; sanitize via a small helper
+    (replace non-alphanumeric with ~_~).
+
+*** Subtasks
+
+    - [X] Add ~traces_project: Optional[str]~ to ~EvalReport~ and
+          populate it in ~evaluate.py~ from ~cfg.traces_project~
+    - [X] Teach ~_model_label~ in ~compare_evals.py~ to prefer
+          ~report.traces_project~, fall back to filename stem
+    - [X] Thread the ~question~ column from the dataset parquet
+          through ~_build_comparison_df~ so it is available to the
+          exporter
+    - [X] Add ~--export_head_to_head <dir>~ (and optional
+          ~--include_ties~) flag to ~compare~
+    - [X] Thread the per-label ~results~ dict (label ->
+          {id: ScoredExample}) into the exporter helper so it can
+          reach ~pred_answer~, ~gold_answer~, and ~metric~
+    - [X] Implement ~_export_head_to_head(dir, df, labels, results,
+          include_ties=False)~ that loops over label combinations
+          and writes one JSONL per pair with the nested schema above
+    - [X] Add filename sanitization helper for project names
+          containing ~/~, spaces, etc.
+    - [X] Spot-check on an existing pair of eval JSONs: run with
+          ~--export_head_to_head=/tmp/h2h~ and verify each JSONL row
+          count matches the aggregate ~a_wins + b_wins~ printed in
+          the head-to-head table
 
 ** TODO Categorize failures in eval pipeline
    :PROPERTIES:

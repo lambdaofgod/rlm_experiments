@@ -6,6 +6,7 @@ and treating missing predictions as score 0.
 
 import json
 import os
+import re
 from collections import defaultdict
 from itertools import combinations
 
@@ -16,19 +17,30 @@ from config_model import EvalReport
 from evaluate import get_task_code
 
 
-def _model_label(path):
+def _filename_label(path):
     return os.path.splitext(os.path.basename(path))[0]
 
 
+def _sanitize_filename(label):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
+
+
 def load_eval_results(metrics_path):
+    """Load a metrics JSON and return (label, {id: ScoredExample}).
+
+    Label prefers `traces_project` (Phoenix/Arize project name) and falls
+    back to the filename stem for old JSONs that predate the field.
+    """
     with open(metrics_path) as f:
         data = json.load(f)
     report = EvalReport.model_validate(data)
-    return {ex.id: ex for ex in report.examples}
+    label = report.traces_project or _filename_label(metrics_path)
+    return label, {ex.id: ex for ex in report.examples}
 
 
 def _build_comparison_df(results, dataset_df):
-    base = dataset_df[["id", "token_length", "difficulty"]].copy()
+    base = dataset_df[["id", "token_length", "difficulty", "question_nonthinking"]].copy()
+    base = base.rename(columns={"question_nonthinking": "question"})
     base["task"] = dataset_df["secondary_task"].apply(get_task_code)
     base = base.set_index("id")
 
@@ -153,7 +165,74 @@ def _print_shared_dimension_breakdown(df, labels, dimension, ordered_values):
         print()
 
 
-def compare(*metrics_files, dataset="longbench_pro_en.parquet"):
+def _export_head_to_head(output_dir, df, labels, results, include_ties=False):
+    os.makedirs(output_dir, exist_ok=True)
+    written = []
+    for la, lb in combinations(labels, 2):
+        mask = df[f"{la}_score"].notna() & df[f"{lb}_score"].notna()
+        shared = df[mask]
+        if len(shared) == 0:
+            continue
+
+        a_scores = shared[f"{la}_score"]
+        b_scores = shared[f"{lb}_score"]
+        if include_ties:
+            keep_mask = slice(None)
+        else:
+            keep_mask = a_scores != b_scores
+        kept = shared[keep_mask] if include_ties else shared[a_scores != b_scores]
+
+        out_path = os.path.join(
+            output_dir,
+            f"h2h_{_sanitize_filename(la)}_vs_{_sanitize_filename(lb)}.json",
+        )
+        records = []
+        for row_id, row in kept.iterrows():
+            a_score = row[f"{la}_score"]
+            b_score = row[f"{lb}_score"]
+            if a_score > b_score:
+                winner = la
+            elif b_score > a_score:
+                winner = lb
+            else:
+                winner = None
+
+            a_ex = results[la][row_id]
+            b_ex = results[lb][row_id]
+            records.append({
+                "id": row_id,
+                "question": row["question"],
+                "task": row["task"],
+                "token_length": row["token_length"],
+                "difficulty": row["difficulty"],
+                "winner": winner,
+                "gold_answer": a_ex.gold_answer,
+                la: {
+                    "metric": a_ex.metric,
+                    "score": a_ex.score,
+                    "pred": a_ex.pred_answer,
+                },
+                lb: {
+                    "metric": b_ex.metric,
+                    "score": b_ex.score,
+                    "pred": b_ex.pred_answer,
+                },
+            })
+
+        with open(out_path, "w") as f:
+            json.dump(records, f, indent=2, ensure_ascii=False)
+        written.append((out_path, len(records)))
+
+    print("** Head-to-head export")
+    print()
+    print("| file | records |")
+    print("|------+---------|")
+    for path, n in written:
+        print(f"| {path} | {n} |")
+    print()
+
+
+def compare(*metrics_files, dataset="longbench_pro_en.parquet", export_head_to_head=None, include_ties=False):
     if len(metrics_files) < 2:
         print("Error: provide at least 2 metrics JSON files")
         return
@@ -162,9 +241,11 @@ def compare(*metrics_files, dataset="longbench_pro_en.parquet"):
     labels = []
     results = {}
     for path in metrics_files:
-        label = _model_label(path)
+        label, scored = load_eval_results(path)
+        if label in results:
+            label = f"{label}__{_filename_label(path)}"
         labels.append(label)
-        results[label] = load_eval_results(path)
+        results[label] = scored
 
     df = _build_comparison_df(results, dataset_df)
 
@@ -179,6 +260,9 @@ def compare(*metrics_files, dataset="longbench_pro_en.parquet"):
         df, labels, "difficulty",
         ["Easy", "Moderate", "Hard", "Extreme"],
     )
+
+    if export_head_to_head:
+        _export_head_to_head(export_head_to_head, df, labels, results, include_ties=include_ties)
 
 
 if __name__ == "__main__":

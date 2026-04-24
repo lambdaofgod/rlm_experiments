@@ -550,7 +550,7 @@ def _print_summary(summary, results, show_errors, error_summary=None):
         print()
 
 
-def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None, error_summary=None):
+def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None, error_summary=None, traces_project=None):
     """Score predictions against gold answers. Shared by evaluate and phoenix."""
     merged = df_gold.merge(df_pred[["id", "pred_answer"]], on="id", how="inner")
     print(f"Matched {len(merged)}/{len(df_gold)} examples")
@@ -568,7 +568,12 @@ def _score_predictions(df_gold, df_pred, show_errors=False, output_metrics=None,
     _print_summary(summary, results, show_errors, error_summary=error_summary)
 
     if output_metrics:
-        report = EvalReport(summary=summary, examples=results, error_summary=error_summary)
+        report = EvalReport(
+            summary=summary,
+            examples=results,
+            error_summary=error_summary,
+            traces_project=traces_project,
+        )
         with open(output_metrics, "w") as f:
             json.dump(report.model_dump(), f, indent=2)
         print(f"Metrics written to {output_metrics}")
@@ -651,7 +656,14 @@ def evaluate(
         print("Error: provide --config_path (traces) or --predictions_path (file)")
         return
 
-    scored = _score_predictions(df_gold, df_pred, show_errors=show_errors, output_metrics=output_metrics, error_summary=error_summary)
+    scored = _score_predictions(
+        df_gold,
+        df_pred,
+        show_errors=show_errors,
+        output_metrics=output_metrics,
+        error_summary=error_summary,
+        traces_project=cfg.traces_project if cfg else None,
+    )
 
     if cfg is not None and (cfg.traces_backend or "phoenix") == "phoenix":
         rows = _build_annotation_rows(scored, df_pred)

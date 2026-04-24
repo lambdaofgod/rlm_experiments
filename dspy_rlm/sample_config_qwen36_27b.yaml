@@ -1,0 +1,26 @@
+traces_endpoint: "http://localhost:6006/v1/traces"
+traces_project: "dspy-sft-longbench-qwen36-27b-sample"
+traces_backend: "phoenix"
+
+lm:
+  model: "openai/qwen3.6-27b"
+  api_base: "http://192.168.1.91:8888/v1"
+  api_key: "sk-unsloth-76ee7ea716bad4b0c80527944c7ecd54"
+  max_tokens: 32000
+  timeout: 120
+dataset:
+  path: "sample_longbench_pro_en.parquet"
+  label_field: "answer"
+  prompt_template:
+    context: "{context}"
+    query: "{question_thinking}"
+
+module:
+  type: "CustomizableRLM"
+  signature: "context, query -> answer"
+  kwargs: {}
+
+collection:
+  num_threads: 1
+  metric: "always_true"
+  output_dir: "./sft_data"
